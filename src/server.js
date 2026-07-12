@@ -8,6 +8,7 @@ import { createCredentialStore } from "./credentialStore.js";
 import { fetchBatchPrices } from "./batch.js";
 import { createCollector } from "./collector.js";
 import { resolveEdgeToken } from "./edgeAuth.js";
+import { createExportService } from "./exportService.js";
 import { getProvider } from "./providerRegistry.js";
 import { createApiRouter, errorResponse } from "./routes.js";
 import { createScheduler } from "./scheduler.js";
@@ -36,6 +37,11 @@ export function createDefaultServices(options = {}) {
   const credentialStore = createCredentialStore({ vaultPath: paths.credentialVaultPath });
   const browserAdapter = createPlaywrightEdgeAdapter({ profileDir: paths.profileDir });
   const authManager = createAuthManager({ repository, browserAdapter, credentialStore });
+  const exportService = createExportService({
+    repository,
+    credentialStore,
+    dbPath: paths.dbPath
+  });
   const queue = createTaskQueue({
     concurrency: Number(process.env.COLLECTOR_CONCURRENCY || 5),
     timeoutMs: Number(process.env.COLLECTOR_TIMEOUT_MS || 90_000)
@@ -51,6 +57,7 @@ export function createDefaultServices(options = {}) {
     paths,
     repository,
     authManager,
+    exportService,
     queue,
     collector,
     scheduler,
@@ -84,7 +91,10 @@ export function createServer(services = createDefaultServices()) {
         headers: req.headers,
         remoteAddress: req.socket.remoteAddress
       });
-      if (routed) return sendJson(res, routed.body, routed.status);
+      if (routed) {
+        if (Buffer.isBuffer(routed.body)) return sendBuffer(res, routed.body, routed.status, routed.headers);
+        return sendJson(res, routed.body, routed.status);
+      }
 
       if (req.method !== "GET") return sendJson(res, { error: "Method Not Allowed" }, 405);
       return serveStatic(requestUrl, res);
@@ -168,6 +178,14 @@ function sendJson(res, payload, status = 200) {
     "Content-Length": Buffer.byteLength(text)
   });
   res.end(text);
+}
+
+function sendBuffer(res, payload, status = 200, headers = {}) {
+  res.writeHead(status, {
+    ...headers,
+    "Content-Length": payload.length
+  });
+  res.end(payload);
 }
 
 async function readJsonBody(req) {

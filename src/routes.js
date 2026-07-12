@@ -12,7 +12,7 @@ export class RouteError extends Error {
   }
 }
 
-export function createApiRouter({ repository, collector, authManager, scheduler, apiAuth = null }) {
+export function createApiRouter({ repository, collector, authManager, scheduler, exportService, apiAuth = null }) {
   const externalAuth = apiAuth ?? createExternalApiAuth({
     getHash: () => repository.getExternalApiKeyHash(),
     setHash: (hash) => repository.setExternalApiKeyHash(hash)
@@ -26,6 +26,20 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
 
     if (external && method === "GET") {
       return routeExternalApi({ pathname, parts, url, repository });
+    }
+
+    if (method === "GET" && pathname === "/api/exports/data.json") {
+      return downloadResponse(await exportService.exportDataJson());
+    }
+    if (method === "GET" && pathname === "/api/exports/rates.csv") {
+      return downloadResponse(await exportService.exportRatesCsv());
+    }
+    if (method === "POST" && pathname === "/api/exports/encrypted-backup") {
+      try {
+        return downloadResponse(await exportService.exportEncryptedBackup(body.password));
+      } catch (error) {
+        throw sanitizeExportError(error, body.password);
+      }
     }
 
     if (method === "GET" && pathname === "/api/status") {
@@ -302,6 +316,44 @@ function requireEntity(value, label) {
 
 function ok(body) { return { status: 200, body }; }
 function created(body) { return { status: 201, body }; }
+
+function downloadResponse(artifact) {
+  if (!artifact || !Buffer.isBuffer(artifact.body) || !/^[A-Za-z0-9._-]+$/.test(artifact.filename)) {
+    throw new RouteError("导出文件无效", 500);
+  }
+  return {
+    status: 200,
+    body: artifact.body,
+    headers: {
+      "Content-Type": artifact.contentType,
+      "Content-Disposition": `attachment; filename="${artifact.filename}"`,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    }
+  };
+}
+
+function sanitizeExportError(error, password) {
+  const secret = typeof password === "string" ? password : "";
+  if (!secret || !error || typeof error !== "object") return error;
+  const sanitized = new Error(redactKnownSecret(error.message, secret));
+  Object.setPrototypeOf(sanitized, Object.getPrototypeOf(error));
+  sanitized.name = error.name;
+  for (const [key, value] of Object.entries(error)) {
+    sanitized[key] = redactKnownSecret(value, secret);
+  }
+  return sanitized;
+}
+
+function redactKnownSecret(value, secret) {
+  if (typeof value === "string") return value.split(secret).join("[REDACTED]");
+  if (Array.isArray(value)) return value.map((child) => redactKnownSecret(child, secret));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    redactKnownSecret(child, secret)
+  ]));
+}
 
 function isValidationError(error) {
   return /不能为空|必须|不支持|已存在|禁止|无效|不存在/.test(error?.message ?? "");

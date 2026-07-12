@@ -41,6 +41,18 @@ export function createCredentialStore({ vaultPath, protector = createDpapiProtec
     });
   }
 
+  async function exportAll() {
+    return mutex(async () => structuredClone(await readVault()));
+  }
+
+  async function replaceAll(entries) {
+    validateVaultEntries(entries);
+    return mutex(async () => {
+      await writeVault(structuredClone(entries));
+      return true;
+    });
+  }
+
   async function readVault() {
     let cipherText;
     try {
@@ -64,7 +76,7 @@ export function createCredentialStore({ vaultPath, protector = createDpapiProtec
     await writeFile(vaultPath, cipherText, { encoding: "utf8", mode: 0o600 });
   }
 
-  return { get, has, set, delete: remove };
+  return { get, has, set, delete: remove, exportAll, replaceAll };
 }
 
 export function createDpapiProtector({ run = runPowerShell } = {}) {
@@ -135,6 +147,16 @@ function validateCredentials(credentials) {
   if (Object.keys(credentials).length === 0) throw new Error("凭据不能为空");
   for (const value of Object.values(credentials)) {
     if (typeof value !== "string") throw new Error("凭据字段必须是字符串");
+  }
+}
+
+function validateVaultEntries(entries) {
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) {
+    throw new Error("凭据库内容无效");
+  }
+  for (const [reference, credentials] of Object.entries(entries)) {
+    validateReference(reference);
+    validateCredentials(credentials);
   }
 }
 

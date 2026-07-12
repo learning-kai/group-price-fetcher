@@ -1,9 +1,7 @@
 import { newApiProvider } from "./providers/newApi.js";
 import { sub2apiProvider } from "./providers/sub2api.js";
-import { ulingGatewayProvider } from "./providers/ulingGateway.js";
 
 const providers = new Map([
-  [ulingGatewayProvider.id, ulingGatewayProvider],
   [sub2apiProvider.id, sub2apiProvider],
   [newApiProvider.id, newApiProvider]
 ]);
@@ -18,7 +16,7 @@ export function listProviders() {
   }));
 }
 
-export function getProvider(providerId = ulingGatewayProvider.id) {
+export function getProvider(providerId = sub2apiProvider.id) {
   const provider = providers.get(providerId);
   if (!provider) {
     throw new Error(`未知 provider：${providerId}`);

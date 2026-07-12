@@ -59,3 +59,27 @@ test("credential store serializes concurrent updates without losing entries", as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("credential store exports defensive copies and replaces the complete vault", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-credentials-"));
+  const vaultPath = path.join(dir, "credentials.vault");
+  const protector = {
+    async protect(value) { return Buffer.from(value).toString("base64"); },
+    async unprotect(value) { return Buffer.from(value, "base64").toString("utf8"); }
+  };
+  const store = createCredentialStore({ vaultPath, protector });
+
+  try {
+    await store.set("site:1", { email: "one@example.com", password: "secret-one" });
+    const entries = await store.exportAll();
+    entries["site:1"].password = "mutated";
+    assert.equal((await store.get("site:1")).password, "secret-one");
+
+    await store.replaceAll({ "site:2": { accessToken: "token-two", userId: "2" } });
+    assert.equal(await store.get("site:1"), null);
+    assert.deepEqual(await store.get("site:2"), { accessToken: "token-two", userId: "2" });
+    await assert.rejects(() => store.replaceAll({ invalid: { password: "value" } }), /凭据引用无效/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

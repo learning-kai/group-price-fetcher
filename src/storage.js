@@ -47,7 +47,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         base_url TEXT NOT NULL UNIQUE,
-        provider_id TEXT NOT NULL DEFAULT 'uling-gateway',
+        provider_id TEXT NOT NULL DEFAULT 'sub2api',
         category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
         schedule_minutes INTEGER,
         enabled INTEGER NOT NULL DEFAULT 1,
@@ -145,6 +145,13 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       CREATE INDEX idx_changes_created ON change_events(created_at DESC, id DESC);
       CREATE INDEX idx_changes_site_created ON change_events(site_id, created_at DESC, id DESC);
       PRAGMA user_version = 3;
+      COMMIT;
+    `);
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 4) db.exec(`
+      BEGIN;
+      UPDATE sites SET provider_id = 'sub2api' WHERE provider_id = 'uling-gateway';
+      PRAGMA user_version = 4;
       COMMIT;
     `);
   }
@@ -607,6 +614,40 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       .run(nextRunAt, iso(clock()), siteId);
   }
 
+  function exportPublicData(exportedAt = iso(clock())) {
+    const sites = db.prepare(siteSelect()).all().map(mapSite).map((site) => ({
+      id: site.id,
+      name: site.name,
+      baseUrl: site.baseUrl,
+      providerId: site.providerId,
+      categoryId: site.categoryId,
+      categoryName: site.categoryName,
+      tags: site.tags,
+      enabled: site.enabled,
+      authStatus: site.authStatus,
+      lastCollectedAt: site.lastCollectedAt,
+      updatedAt: site.updatedAt
+    }));
+    const rates = db.prepare(`
+      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name
+      FROM rate_versions r JOIN sites s ON s.id = r.site_id
+      LEFT JOIN categories c ON c.id = s.category_id
+      WHERE r.valid_to IS NULL
+      ORDER BY s.name COLLATE NOCASE, r.group_name COLLATE NOCASE, r.id
+    `).all().map(mapRate);
+    const changes = db.prepare(`
+      SELECT e.*, s.name AS site_name, s.base_url, c.name AS category_name
+      FROM change_events e JOIN sites s ON s.id = e.site_id
+      LEFT JOIN categories c ON c.id = s.category_id
+      ORDER BY e.created_at DESC, e.id DESC
+    `).all().map(mapChange);
+    return { formatVersion: 1, exportedAt: iso(exportedAt), sites, rates, changes };
+  }
+
+  function checkpoint() {
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+
   function close() {
     db.close();
   }
@@ -642,7 +683,9 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     getRateHistory,
     listChanges,
     listDueSites,
-    setNextRun
+    setNextRun,
+    exportPublicData,
+    checkpoint
   };
 
   function replaceSiteTags(siteId, tags) {
@@ -686,7 +729,7 @@ function siteSelect(where = "") {
 }
 
 function normalizeSiteInput(input) {
-  const providerId = requiredText(input.providerId ?? "uling-gateway", "Provider");
+  const providerId = requiredText(input.providerId ?? "sub2api", "Provider");
   return {
     name: requiredText(input.name, "站点名称"),
     baseUrl: normalizeBaseUrl(input.baseUrl),

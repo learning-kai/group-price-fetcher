@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { resolveAppPaths } from "../src/appPaths.js";
 import { createRepository } from "../src/storage.js";
 
@@ -44,6 +45,44 @@ test("repository migrations are idempotent and site configuration round-trips", 
     );
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("v4 migration maps legacy Uling sites to sub2api", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-v4-migration-"));
+  const dbPath = path.join(dir, "prices.db");
+  let repo = createRepository({ dbPath });
+  try {
+    const site = repo.createSite({
+      name: "旧站",
+      baseUrl: "https://legacy.example.com",
+      providerId: "sub2api",
+      authMode: "edge-profile",
+      tags: ["保留"]
+    });
+    repo.close();
+    repo = null;
+
+    const raw = new DatabaseSync(dbPath);
+    raw.prepare("UPDATE sites SET provider_id = 'uling-gateway' WHERE id = ?").run(site.id);
+    raw.exec("PRAGMA user_version = 3");
+    raw.close();
+
+    repo = createRepository({ dbPath });
+    const migrated = repo.getSite(site.id);
+    assert.equal(migrated.providerId, "sub2api");
+    assert.equal(migrated.baseUrl, "https://legacy.example.com");
+    assert.equal(migrated.authMode, "edge-profile");
+    assert.deepEqual(migrated.tags, ["保留"]);
+    repo.close();
+    repo = null;
+
+    const verification = new DatabaseSync(dbPath);
+    assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 4);
+    verification.close();
+  } finally {
+    repo?.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 
@@ -174,6 +213,51 @@ test("collections record explicit changes after suppressing the initial baseline
     const unchanged = fixture.repo.saveCollection(site.id, changed, "2026-07-13T02:00:00.000Z", run3);
     assert.equal(unchanged.changeCount, 0);
     assert.equal(fixture.repo.listChanges({ siteId: site.id }).total, 11);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("public export is unpaginated and omits authentication metadata", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({
+      name: "导出站",
+      baseUrl: "https://export.example.com",
+      providerId: "sub2api",
+      authMode: "sub2api-password"
+    });
+    fixture.repo.setSiteAuthConfig(site.id, {
+      authMode: "sub2api-password",
+      username: "export@example.com",
+      credentialRef: `site:${site.id}`
+    });
+    const baseline = Array.from({ length: 501 }, (_, index) => detailedGroup(`group-${index}`, {
+      groupName: `分组 ${index}`,
+      rate: 0.2
+    }));
+    const changed = baseline.map((group) => ({
+      ...group,
+      baseRateMultiplier: 0.1,
+      effectiveRateMultiplier: 0.1,
+      peakRate: { ...group.peakRate, effectiveMultiplier: 0.1 }
+    }));
+    fixture.repo.saveCollection(site.id, { groups: baseline }, "2026-07-13T00:00:00.000Z");
+    fixture.repo.saveCollection(site.id, { groups: changed }, "2026-07-13T01:00:00.000Z");
+
+    fixture.repo.checkpoint();
+    const exported = fixture.repo.exportPublicData("2026-07-13T03:00:00.000Z");
+    assert.equal(exported.formatVersion, 1);
+    assert.equal(exported.exportedAt, "2026-07-13T03:00:00.000Z");
+    assert.equal(exported.rates.length, 501);
+    assert.equal(exported.changes.length, 501);
+    assert.equal(exported.sites.length, 1);
+    assert.equal(exported.sites[0].authStatus, "unknown");
+    const serialized = JSON.stringify(exported);
+    assert.equal(serialized.includes("export@example.com"), false);
+    assert.equal(serialized.includes("credentialConfigured"), false);
+    assert.equal(serialized.includes("credentialRef"), false);
+    assert.equal(serialized.includes("external_api_key_hash"), false);
   } finally {
     await fixture.cleanup();
   }

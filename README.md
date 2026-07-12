@@ -16,12 +16,14 @@ Gateway pricing is often scattered across authenticated dashboards with incompat
 ## Core Features
 
 - Collects group multipliers from sub2api-style and NewAPI endpoints.
+- Removes the visible Uling19 Provider, leaving sub2api and NewAPI. SQLite schema v4 automatically migrates legacy `uling-gateway` sites to `sub2api` without changing their URLs, site records, or rate history.
 - Supports sub2api email/password login, NewAPI public and token-enhanced collection, and a persistent Edge profile fallback.
 - Encrypts saved account credentials with Windows DPAPI; SQLite stores metadata only.
 - Sorts and filters rates by site, category, tag, platform, group status, and authentication status.
 - Records explicit add, remove, ratio, description, RPM, quota, billing, and peak-rule changes.
 - Runs scheduled collection with bounded concurrency and per-site failure isolation.
 - Exposes stable read-only endpoints under `/api/external/v1` for other local or LAN software.
+- Exports ordinary JSON/CSV data and password-encrypted, portable `.gpfbackup` disaster-recovery archives.
 
 ## Screenshots & Demo
 
@@ -75,6 +77,23 @@ GET /api/external/v1/sites/:id/groups/:groupId/history
 
 For LAN access, generate an API key in Settings, start with `HOST=0.0.0.0`, and send `Authorization: Bearer <API_KEY>`. Management and credential endpoints remain loopback-only.
 
+## Export, Backup & Restore
+
+Settings provides two different export paths:
+
+- Ordinary JSON/CSV exports contain only public site data, current rates, and change data. They contain no login credentials or API key hash and are not suitable for complete disaster recovery. JSON contains the public site, current-rate, and change collections; CSV contains current-rate rows.
+- A `.gpfbackup` file is a complete portable backup. It contains a checkpointed SQLite database and saved credentials, encrypted with scrypt (`N=32768`, `r=8`, `p=1`) and AES-256-GCM. The Edge Profile and browser cookies are not included.
+
+The backup password must contain at least 10 characters. It is never stored and cannot be recovered if lost.
+
+Restore offline from an interactive PowerShell terminal:
+
+```powershell
+npm run backup:restore -- "C:\path\to\backup.gpfbackup"
+```
+
+Stop the service listening on port 5177 before restoring; the CLI refuses to restore while that service is still running. Before replacement, restore creates pre-restore backups of the database and credential vault. If replacement fails, it rolls the database and vault back together.
+
 ## Engineering Quality
 
 The project uses the built-in Node.js test runner and real temporary SQLite databases. The acceptance suite covers 60-site concurrency, partial failures, authentication refresh, Provider normalization, change-only history, API authorization, credential redaction, and restart recovery.
@@ -111,9 +130,10 @@ Runtime data lives outside the repository:
 ```
 
 - Passwords and NewAPI tokens are encrypted with Windows DPAPI CurrentUser scope.
-- Access tokens, refresh tokens, cookies, and passwords are excluded from SQLite, logs, exports, and API responses.
+- Access tokens, refresh tokens, cookies, and passwords are excluded from SQLite, logs, ordinary JSON/CSV exports, and API responses. Saved credentials are included only inside the password-encrypted `.gpfbackup` format.
 - API keys are stored as SHA-256 hashes.
-- DPAPI and Edge profile state are not portable to another Windows account; re-authenticate after migration.
+- Ordinary JSON/CSV exports never include the API key hash and are not complete backups. `.gpfbackup` archives are portable, but Edge Profile state and cookies are not; re-authenticate browser-backed sites after migration.
+- A lost `.gpfbackup` password cannot be recovered.
 - Respect each upstream site's terms, rate limits, and access rules.
 
 ## Release & Updates
@@ -122,10 +142,7 @@ The current source version is `0.1.0`. Release notes and migration details will 
 
 ## Roadmap
 
-- Remove the legacy visible Uling19 Provider and migrate existing configurations to sub2api.
-- Add ordinary JSON/CSV exports.
-- Add password-encrypted portable backup and offline restore.
-- Add optional change notifications after the core backup workflow is stable.
+- Add optional change notifications.
 
 ## Contributing
 

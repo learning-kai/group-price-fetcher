@@ -127,6 +127,20 @@
             </div>
             <label id="api-key-result" hidden><span>新 API Key（仅显示一次）</span><input id="api-key-output" readonly></label>
           </section>
+          <section class="settings-block">
+            <header><div><p>EXPORTS</p><h2>数据导出与完整备份</h2></div></header>
+            <h3>普通数据导出</h3>
+            <div class="inline-form">
+              <button id="export-json" class="secondary-command" type="button">导出 JSON</button>
+              <button id="export-csv" class="secondary-command" type="button">导出 CSV</button>
+            </div>
+            <h3>完整加密备份</h3>
+            <form id="backup-form" class="inline-form">
+              <label><span>备份密码</span><input id="backup-password" type="password" autocomplete="new-password" minlength="10" required></label>
+              <label><span>确认密码</span><input id="backup-password-confirm" type="password" autocomplete="new-password" minlength="10" required></label>
+              <button id="export-encrypted-backup" class="primary-command" type="submit">导出加密备份</button>
+            </form>
+          </section>
         </section>
       </main>
     </div>

@@ -16,12 +16,14 @@
 ## 核心特性
 
 - 采集 sub2api 风格接口和 NewAPI 的分组倍率。
+- 可见的 Uling19 Provider 已删除，仅保留 sub2api 和 NewAPI。SQLite v4 会自动把旧 `uling-gateway` 站点迁移为 `sub2api`，不改变 URL、站点记录或倍率历史。
 - 支持 sub2api 邮箱密码、NewAPI 公开/Token 增强采集，以及持久化 Edge Profile 兜底。
 - 使用 Windows DPAPI 加密保存账号凭据，SQLite 只保存元数据。
 - 按站点、分类、标签、平台、分组状态和认证状态筛选排序。
 - 显式记录分组新增删除、倍率、说明、RPM、额度、计费和峰值规则变化。
 - 分层定时采集、并发上限控制和单站失败隔离。
 - 通过 `/api/external/v1` 为本机或局域网其他软件提供稳定只读接口。
+- 支持普通 JSON/CSV 数据导出，以及使用密码加密、可移植的 `.gpfbackup` 完整灾备。
 
 ## 截图与演示
 
@@ -75,6 +77,23 @@ GET /api/external/v1/sites/:id/groups/:groupId/history
 
 局域网访问需要在设置中生成 API Key，以 `HOST=0.0.0.0` 启动，并发送 `Authorization: Bearer <API_KEY>`。管理和凭据接口仍只允许本机访问。
 
+## 导出、备份与恢复
+
+设置页提供两类用途不同的导出：
+
+- 普通 JSON/CSV 仅包含公开站点数据、当前倍率和变化数据，不包含登录凭据或 API Key 哈希，不适合完整灾备。JSON 包含公开站点、当前倍率和变化集合；CSV 包含当前倍率记录。
+- `.gpfbackup` 是完整可移植备份，包含已执行 checkpoint 的 SQLite 数据库和已保存凭据，使用 scrypt（`N=32768`、`r=8`、`p=1`）派生密钥并以 AES-256-GCM 加密。Edge Profile 和浏览器 Cookie 不包含在内。
+
+备份密码至少需要 10 个字符。密码不会被保存，丢失后无法恢复。
+
+请在交互式 PowerShell 终端中离线恢复：
+
+```powershell
+npm run backup:restore -- "C:\path\to\backup.gpfbackup"
+```
+
+恢复前必须停止监听 5177 端口的服务；服务仍运行时，CLI 会拒绝恢复。替换数据前会自动创建恢复前数据库和凭据 vault 备份；替换失败时，数据库和 vault 会成对回滚。
+
 ## 工程质量
 
 项目使用 Node.js 内置测试框架和真实临时 SQLite 数据库。验收测试覆盖 60 站并发、部分失败、认证刷新、Provider 归一化、仅变化历史、API 鉴权、凭据脱敏和重启恢复。
@@ -111,9 +130,10 @@ npm run test:acceptance
 ```
 
 - 密码和 NewAPI Token 使用 Windows DPAPI CurrentUser 范围加密。
-- Access Token、Refresh Token、Cookie 和密码不会写入 SQLite、日志、导出或 API 响应。
+- Access Token、Refresh Token、Cookie 和密码不会写入 SQLite、日志、普通 JSON/CSV 导出或 API 响应；已保存凭据只会进入密码加密的 `.gpfbackup`。
 - API Key 只保存 SHA-256 哈希。
-- DPAPI 和 Edge Profile 无法直接迁移到其他 Windows 用户；迁移后需要重新认证。
+- 普通 JSON/CSV 不包含 API Key 哈希，也不是完整备份。`.gpfbackup` 可移植，但不包含 Edge Profile 和 Cookie；迁移后，使用浏览器登录态的站点需要重新认证。
+- `.gpfbackup` 密码丢失后无法恢复。
 - 使用时应遵守各上游站点的服务条款、频率限制和访问规则。
 
 ## 发布与更新
@@ -122,10 +142,7 @@ npm run test:acceptance
 
 ## 路线图
 
-- 移除可见的旧 Uling19 Provider，并把已有配置迁移到 sub2api。
-- 增加普通 JSON/CSV 导出。
-- 增加密码加密的可迁移完整备份和离线恢复。
-- 核心备份流程稳定后增加可选变化通知。
+- 增加可选变化通知。
 
 ## 贡献
 

@@ -54,3 +54,43 @@ test("dashboard script uses management APIs and explicit auth actions", async ()
   assert.match(script, /error/i);
   assert.match(script, /safeHandler/);
 });
+
+test("settings exposes ordinary exports and password-safe encrypted backup controls", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  for (const id of [
+    "export-json",
+    "export-csv",
+    "backup-password",
+    "backup-password-confirm",
+    "export-encrypted-backup"
+  ]) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+  }
+  for (const id of ["backup-password", "backup-password-confirm"]) {
+    const input = html.match(new RegExp(`<input[^>]*id=["']${id}["'][^>]*>`))?.[0] ?? "";
+    assert.ok(input, `missing password input #${id}`);
+    assert.match(input, /\stype=["']password["']/i);
+    assert.match(input, /\sautocomplete=["']new-password["']/i);
+    assert.doesNotMatch(input, /\svalue=/i);
+  }
+});
+
+test("dashboard script downloads exports and clears encrypted backup passwords", async () => {
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const endpoint of [
+    "/api/exports/data.json",
+    "/api/exports/rates.csv",
+    "/api/exports/encrypted-backup"
+  ]) {
+    assert.ok(script.includes(endpoint), `missing export API usage ${endpoint}`);
+  }
+  assert.match(script, /response\.blob\(\)/);
+  assert.match(script, /document\.createElement\(["']a["']\)/);
+  assert.match(script, /\.download\s*=/);
+  assert.match(script, /URL\.createObjectURL\(/);
+  assert.match(script, /URL\.revokeObjectURL\(/);
+  assert.match(script, /password\.length\s*<\s*10/);
+  assert.match(script, /password\s*!==\s*confirmation/);
+  assert.match(script, /body:\s*\{\s*password\s*\}/);
+  assert.match(script, /finally\s*\{[\s\S]*?#backup-password[\s\S]*?\.value\s*=\s*["']["'][\s\S]*?#backup-password-confirm[\s\S]*?\.value\s*=\s*["']["']/);
+});

@@ -44,6 +44,9 @@ function bindEvents() {
   $("#schedule-form").addEventListener("submit", safeHandler(saveGlobalSchedule));
   $("#category-form").addEventListener("submit", safeHandler(addCategory));
   $("#rotate-api-key").addEventListener("click", safeHandler(rotateApiKey));
+  $("#export-json").addEventListener("click", safeHandler(exportJson));
+  $("#export-csv").addEventListener("click", safeHandler(exportCsv));
+  $("#backup-form").addEventListener("submit", safeHandler(exportEncryptedBackup));
   $("#site-provider").addEventListener("change", handleProviderChange);
   $("#site-auth-mode").addEventListener("change", updateCredentialFields);
   $("#sites-body").addEventListener("click", safeHandler(handleSiteAction));
@@ -351,6 +354,58 @@ async function rotateApiKey() {
   $("#api-key-result").hidden = false;
   $("#api-key-status").textContent = "API Key 已配置";
   showToast("新 API Key 已生成");
+}
+
+async function exportJson(event) {
+  await withButton(event.currentTarget, () => downloadArtifact("/api/exports/data.json"));
+  showToast("JSON 数据已导出");
+}
+
+async function exportCsv(event) {
+  await withButton(event.currentTarget, () => downloadArtifact("/api/exports/rates.csv"));
+  showToast("CSV 数据已导出");
+}
+
+async function exportEncryptedBackup(event) {
+  event.preventDefault();
+  const password = $("#backup-password").value;
+  const confirmation = $("#backup-password-confirm").value;
+  try {
+    if (password.length < 10) throw new Error("备份密码至少 10 个字符");
+    if (password !== confirmation) throw new Error("两次输入的备份密码不一致");
+    await withButton($("#export-encrypted-backup"), () => downloadArtifact("/api/exports/encrypted-backup", {
+      method: "POST",
+      body: { password }
+    }));
+    showToast("完整加密备份已导出");
+  } finally {
+    $("#backup-password").value = "";
+    $("#backup-password-confirm").value = "";
+  }
+}
+
+async function downloadArtifact(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method ?? "GET",
+    headers: options.body ? { "Content-Type": "application/json" } : {},
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `导出失败：HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "export.bin";
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 async function clearChangeSiteFilter() {

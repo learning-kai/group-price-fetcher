@@ -141,6 +141,7 @@ async function loadRates() {
     platform: $("#platform-filter").value,
     status: $("#group-status-filter").value,
     authStatus: $("#auth-filter").value,
+    visibility: $("#rate-visibility").value,
     sortBy: $("#sort-field").value,
     sortDir: $("#sort-direction").value,
     page: state.rates.page,
@@ -172,7 +173,12 @@ function renderRates() {
         <td class="numeric">${formatRate(rate.baseRateMultiplier)}</td>
         <td class="numeric rate-value">${formatRate(rate.effectiveRateMultiplier)}</td>
         <td class="time-cell">${formatDate(rate.validFrom)}</td>
-        <td class="row-actions"><button type="button" data-action="history" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}" data-label="${escapeAttr(`${rate.siteName} / ${rate.groupName}`)}">历史</button></td>
+        <td class="row-actions">
+          <button type="button" data-action="history" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}" data-label="${escapeAttr(`${rate.siteName} / ${rate.groupName}`)}">历史</button>
+          ${rate.hidden
+            ? `<button type="button" data-action="restore" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}">恢复</button>`
+            : `<button type="button" data-action="hide" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}">隐藏</button>`}
+        </td>
       </tr>`).join("");
   }
   const sites = new Set(items.map((item) => item.siteId));
@@ -258,8 +264,19 @@ async function handleSiteAction(event) {
 }
 
 async function handleRateAction(event) {
-  const button = event.target.closest('button[data-action="history"]');
+  const button = event.target.closest("button[data-action]");
   if (!button) return;
+  const action = button.dataset.action;
+  if (["hide", "restore"].includes(action)) {
+    const methods = { hide: "PUT", restore: "DELETE" };
+    const endpoint = `/api/sites/${button.dataset.siteId}/groups/${encodeURIComponent(button.dataset.groupId)}/hidden`;
+    await withButton(button, () => api(endpoint, { method: methods[action] }));
+    state.rates.page = 1;
+    await loadRates();
+    showToast(action === "hide" ? "分组已隐藏" : "分组已恢复");
+    return;
+  }
+  if (action !== "history") return;
   $("#history-title").textContent = button.dataset.label;
   $("#history-body").innerHTML = '<tr class="empty"><td colspan="5">正在加载历史</td></tr>';
   $("#history-dialog").showModal();

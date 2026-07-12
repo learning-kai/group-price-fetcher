@@ -17,6 +17,7 @@ test("dashboard exposes management, filtering, sorting, pagination and history c
     "platform-filter",
     "group-status-filter",
     "auth-filter",
+    "rate-visibility",
     "sort-field",
     "sort-direction",
     "page-prev",
@@ -53,6 +54,23 @@ test("dashboard script uses management APIs and explicit auth actions", async ()
   assert.match(script, /empty/i);
   assert.match(script, /error/i);
   assert.match(script, /safeHandler/);
+});
+
+test("latest rates can switch hidden groups and persist hide or restore actions", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+
+  const visibility = html.match(/<select[^>]*id=["']rate-visibility["'][^>]*>[\s\S]*?<\/select>/)?.[0] ?? "";
+  assert.match(visibility, /value=["']visible["'][^>]*>正常显示/);
+  assert.match(visibility, /value=["']hidden["'][^>]*>已隐藏/);
+  assert.match(script, /visibility:\s*\$\(["']#rate-visibility["']\)\.value/);
+  assert.match(script, /data-action=["']hide["']/);
+  assert.match(script, /data-action=["']restore["']/);
+  assert.ok(script.includes("/groups/"));
+  assert.ok(script.includes("/hidden"));
+  assert.match(script, /hide:\s*["']PUT["']/);
+  assert.match(script, /restore:\s*["']DELETE["']/);
+  assert.match(script, /state\.rates\.page\s*=\s*1[\s\S]*?await loadRates\(\)/);
 });
 
 test("settings exposes ordinary exports and password-safe encrypted backup controls", async () => {

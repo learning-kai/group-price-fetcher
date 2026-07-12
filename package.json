@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "cli": "node src/cli.js",
+    "backup:restore": "node --disable-warning=ExperimentalWarning src/restoreBackupCli.js",
     "test": "node --disable-warning=ExperimentalWarning --test",
     "test:acceptance": "node --disable-warning=ExperimentalWarning --test test/acceptance.test.js",
     "startup:install": "pwsh -NoProfile -File scripts/install-startup.ps1",

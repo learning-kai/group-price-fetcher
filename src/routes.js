@@ -231,7 +231,9 @@ function externalSite(site) {
 }
 
 export function errorResponse(error) {
-  const status = error instanceof RouteError
+  const status = error?.code === "BACKUP_PASSWORD_INVALID"
+    ? 400
+    : error instanceof RouteError
     ? error.status
     : error instanceof AuthError
       ? error.status
@@ -335,24 +337,15 @@ function downloadResponse(artifact) {
 
 function sanitizeExportError(error, password) {
   const secret = typeof password === "string" ? password : "";
-  if (!secret || !error || typeof error !== "object") return error;
-  const sanitized = new Error(redactKnownSecret(error.message, secret));
-  Object.setPrototypeOf(sanitized, Object.getPrototypeOf(error));
-  sanitized.name = error.name;
-  for (const [key, value] of Object.entries(error)) {
-    sanitized[key] = redactKnownSecret(value, secret);
+  const message = typeof error?.message === "string" ? error.message : "加密导出失败";
+  const sanitized = new Error(secret ? message.split(secret).join("[REDACTED]") : message);
+  if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) {
+    sanitized.status = error.status;
+  }
+  if (typeof error?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(error.code)) {
+    sanitized.code = error.code;
   }
   return sanitized;
-}
-
-function redactKnownSecret(value, secret) {
-  if (typeof value === "string") return value.split(secret).join("[REDACTED]");
-  if (Array.isArray(value)) return value.map((child) => redactKnownSecret(child, secret));
-  if (!value || typeof value !== "object") return value;
-  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
-    key,
-    redactKnownSecret(child, secret)
-  ]));
 }
 
 function isValidationError(error) {

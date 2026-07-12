@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createExportService } from "../src/exportService.js";
 import { createApiRouter } from "../src/routes.js";
 import { createServer } from "../src/server.js";
 import { createRepository } from "../src/storage.js";
@@ -227,11 +228,14 @@ test("local export endpoints download JSON, CSV and encrypted backup artifacts",
     assert.equal(json.headers.get("content-disposition"), 'attachment; filename="data.json"');
     assert.equal(json.headers.get("cache-control"), "no-store");
     assert.equal(json.headers.get("x-content-type-options"), "nosniff");
-    assert.deepEqual(await json.json(), { formatVersion: 1, sites: [], rates: [], changes: [] });
+    const jsonBytes = Buffer.from(await json.arrayBuffer());
+    assert.equal(Number(json.headers.get("content-length")), jsonBytes.length);
+    assert.deepEqual(JSON.parse(jsonBytes.toString("utf8")), { formatVersion: 1, sites: [], rates: [], changes: [] });
 
     const csv = await fetch(`${fixture.baseUrl}/api/exports/rates.csv`);
     assert.equal(csv.headers.get("content-disposition"), 'attachment; filename="rates.csv"');
     const csvBytes = Buffer.from(await csv.arrayBuffer());
+    assert.equal(Number(csv.headers.get("content-length")), csvBytes.length);
     assert.deepEqual([...csvBytes.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
     assert.equal(csvBytes.subarray(3).toString("utf8"), "site_name,rate\n");
 
@@ -241,10 +245,42 @@ test("local export endpoints download JSON, CSV and encrypted backup artifacts",
       body: JSON.stringify({ password: "correct horse battery staple" })
     });
     assert.equal(backup.headers.get("content-disposition"), 'attachment; filename="backup.gpfbackup"');
-    assert.equal(await backup.text(), "encrypted-bytes");
+    const backupBytes = Buffer.from(await backup.arrayBuffer());
+    assert.equal(Number(backup.headers.get("content-length")), backupBytes.length);
+    assert.equal(backupBytes.toString("utf8"), "encrypted-bytes");
     assert.deepEqual(calls, ["correct horse battery staple"]);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("export router returns exactly four business download headers", async () => {
+  const route = createApiRouter({
+    repository: {
+      getExternalApiKeyHash() { return ""; },
+      setExternalApiKeyHash() {}
+    },
+    exportService: {
+      async exportDataJson() { return artifact("data.json", "application/json", "{}"); },
+      async exportRatesCsv() { return artifact("rates.csv", "text/csv", "rates"); },
+      async exportEncryptedBackup() { return artifact("backup.gpfbackup", "application/octet-stream", "backup"); }
+    }
+  });
+  const requests = [
+    ["GET", "/api/exports/data.json", {}],
+    ["GET", "/api/exports/rates.csv", {}],
+    ["POST", "/api/exports/encrypted-backup", { password: "router-test-password" }]
+  ];
+  const expectedHeaders = ["Cache-Control", "Content-Disposition", "Content-Type", "X-Content-Type-Options"];
+
+  for (const [method, pathname, body] of requests) {
+    const response = await route({
+      method,
+      url: new URL(pathname, "http://localhost"),
+      body,
+      remoteAddress: "127.0.0.1"
+    });
+    assert.deepEqual(Object.keys(response.headers).sort(), expectedHeaders);
   }
 });
 
@@ -281,6 +317,27 @@ test("local export endpoints reject non-loopback clients before invoking the exp
   assert.deepEqual(calls, []);
 });
 
+test("encrypted backup endpoint maps real password validation failures to a stable client error", async () => {
+  const fixture = await createFixture({
+    exportServiceFactory({ repository, dbPath }) {
+      return createExportService({
+        repository,
+        dbPath,
+        credentialStore: { async exportAll() { return {}; } }
+      });
+    }
+  });
+  try {
+    for (const body of [{}, { password: "too-short" }]) {
+      const response = await fixture.request("POST", "/api/exports/encrypted-backup", body);
+      assert.equal(response.status, 400);
+      assert.equal(response.body.code, "BACKUP_PASSWORD_INVALID");
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("encrypted export errors do not expose the submitted password in responses or logs", async () => {
   const password = "encrypted-export-test-password-7d42";
   const logs = [];
@@ -290,14 +347,24 @@ test("encrypted export errors do not expose the submitted password in responses 
       async exportDataJson() { throw new Error("not used"); },
       async exportRatesCsv() { throw new Error("not used"); },
       async exportEncryptedBackup() {
-        throw new Error(`encryption failed while using ${password}`);
+        const detail = {
+          nested: { value: `nested ${password}` },
+          [`field-${password}`]: "password used as an object key"
+        };
+        detail.self = detail;
+        throw Object.assign(new Error(`encryption failed while using ${password}`), {
+          status: 502,
+          code: "ENCRYPTION_FAILED",
+          detail
+        });
       }
     }
   });
   console.error = (...args) => logs.push(args.map(String).join(" "));
   try {
     const response = await fixture.request("POST", "/api/exports/encrypted-backup", { password });
-    assert.equal(response.status, 500);
+    assert.equal(response.status, 502);
+    assert.equal(response.body.code, "ENCRYPTION_FAILED");
     assert.equal(JSON.stringify(response.body).includes(password), false);
     assert.equal(logs.some((line) => line.includes(password)), false);
   } finally {
@@ -308,7 +375,11 @@ test("encrypted export errors do not expose the submitted password in responses 
 
 async function createFixture(overrides = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-server-"));
-  const repo = createRepository({ dbPath: path.join(dir, "prices.db") });
+  const dbPath = path.join(dir, "prices.db");
+  const repo = createRepository({ dbPath });
+  const exportService = overrides.exportServiceFactory
+    ? overrides.exportServiceFactory({ repository: repo, dbPath })
+    : overrides.exportService;
   const services = {
     repository: repo,
     collector: overrides.collector ?? { async collectSite() { return sampleCollection(0.02); } },
@@ -320,7 +391,7 @@ async function createFixture(overrides = {}) {
       async close() {}
     },
     scheduler: { status: () => ({ started: false, runningSiteIds: [] }), async start() {}, stop() {} },
-    exportService: overrides.exportService ?? {
+    exportService: exportService ?? {
       async exportDataJson() { throw new Error("not configured"); },
       async exportRatesCsv() { throw new Error("not configured"); },
       async exportEncryptedBackup() { throw new Error("not configured"); }

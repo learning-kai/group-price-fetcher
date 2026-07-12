@@ -48,7 +48,7 @@ test("repository migrations are idempotent and site configuration round-trips", 
   }
 });
 
-test("v4 migration maps legacy Uling sites to sub2api", async () => {
+test("v4 and v5 migrations map legacy providers and create hidden preferences", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-v4-migration-"));
   const dbPath = path.join(dir, "prices.db");
   let repo = createRepository({ dbPath });
@@ -65,7 +65,7 @@ test("v4 migration maps legacy Uling sites to sub2api", async () => {
 
     const raw = new DatabaseSync(dbPath);
     raw.prepare("UPDATE sites SET provider_id = 'uling-gateway' WHERE id = ?").run(site.id);
-    raw.exec("PRAGMA user_version = 3");
+    raw.exec("DROP TABLE hidden_rate_groups; PRAGMA user_version = 3");
     raw.close();
 
     repo = createRepository({ dbPath });
@@ -78,11 +78,79 @@ test("v4 migration maps legacy Uling sites to sub2api", async () => {
     repo = null;
 
     const verification = new DatabaseSync(dbPath);
-    assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 4);
-    verification.close();
+    try {
+      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 5);
+      assert.equal(
+        verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'hidden_rate_groups'").get().count,
+        1
+      );
+    } finally {
+      verification.close();
+    }
   } finally {
     repo?.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("hidden rate groups persist independently from collection data", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({ name: "隐藏站", baseUrl: "https://hidden.example.com" });
+    fixture.repo.saveCollection(site.id, collectionWithGroups([
+      detailedGroup("group-1", { groupName: "隐藏分组", rate: 0.2 }),
+      detailedGroup("group-2", { groupName: "保留分组", rate: 0.4 })
+    ]), "2026-07-13T00:00:00.000Z");
+
+    assert.equal(fixture.repo.hideRateGroup(site.id, "missing"), null);
+    assert.deepEqual(fixture.repo.hideRateGroup(site.id, "group-1"), {
+      siteId: site.id,
+      groupId: "group-1",
+      hidden: true
+    });
+    assert.deepEqual(fixture.repo.hideRateGroup(site.id, "group-1"), {
+      siteId: site.id,
+      groupId: "group-1",
+      hidden: true
+    });
+    assert.deepEqual(
+      fixture.repo.listLatestRates({ visibility: "visible", sortBy: "group" }).items.map((item) => item.groupId),
+      ["group-2"]
+    );
+    assert.deepEqual(
+      fixture.repo.listLatestRates({ visibility: "hidden" }).items.map((item) => [item.groupId, item.hidden]),
+      [["group-1", true]]
+    );
+    assert.equal(fixture.repo.listLatestRates({ visibility: "all" }).total, 2);
+    assert.equal(fixture.repo.listLatestRates().total, 2);
+    assert.throws(() => fixture.repo.listLatestRates({ visibility: "surprise" }), /可见性/);
+
+    fixture.repo.saveCollection(site.id, collectionWithGroups([
+      detailedGroup("group-1", { groupName: "隐藏分组", rate: 0.1 }),
+      detailedGroup("group-2", { groupName: "保留分组", rate: 0.4 })
+    ]), "2026-07-13T01:00:00.000Z");
+    assert.equal(fixture.repo.listLatestRates({ visibility: "hidden" }).items[0].effectiveRateMultiplier, 0.1);
+    assert.equal(fixture.repo.exportPublicData().rates.length, 2);
+
+    assert.deepEqual(fixture.repo.restoreRateGroup(site.id, "group-1"), {
+      siteId: site.id,
+      groupId: "group-1",
+      hidden: false
+    });
+    assert.deepEqual(fixture.repo.restoreRateGroup(site.id, "group-1"), {
+      siteId: site.id,
+      groupId: "group-1",
+      hidden: false
+    });
+    assert.equal(fixture.repo.listLatestRates({ visibility: "visible" }).total, 2);
+
+    fixture.repo.hideRateGroup(site.id, "group-1");
+    fixture.repo.deleteSite(site.id);
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    assert.equal(raw.prepare("SELECT COUNT(*) AS count FROM hidden_rate_groups").get().count, 0);
+    raw.close();
+  } finally {
+    await fixture.cleanup();
   }
 });
 
@@ -269,6 +337,7 @@ async function createFixture() {
   repo.migrate();
   return {
     repo,
+    dbPath: path.join(dir, "prices.db"),
     async cleanup() {
       repo.close();
       await rm(dir, { recursive: true, force: true });

@@ -154,6 +154,18 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       PRAGMA user_version = 4;
       COMMIT;
     `);
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 5) db.exec(`
+      BEGIN;
+      CREATE TABLE hidden_rate_groups (
+        site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        hidden_at TEXT NOT NULL,
+        PRIMARY KEY (site_id, group_id)
+      );
+      PRAGMA user_version = 5;
+      COMMIT;
+    `);
   }
 
   function createCategory(input) {
@@ -547,14 +559,46 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     );
   }
 
+  function hideRateGroup(siteId, groupId) {
+    const id = positiveInteger(siteId, "站点 ID");
+    requireSite(id);
+    const group = requiredText(groupId, "分组 ID");
+    const current = db.prepare(`
+      SELECT 1 FROM rate_versions
+      WHERE site_id = ? AND group_id = ? AND valid_to IS NULL
+    `).get(id, group);
+    if (!current) return null;
+    db.prepare(`
+      INSERT INTO hidden_rate_groups(site_id, group_id, hidden_at)
+      VALUES (?, ?, ?)
+      ON CONFLICT(site_id, group_id) DO NOTHING
+    `).run(id, group, iso(clock()));
+    return { siteId: id, groupId: group, hidden: true };
+  }
+
+  function restoreRateGroup(siteId, groupId) {
+    const id = positiveInteger(siteId, "站点 ID");
+    requireSite(id);
+    const group = requiredText(groupId, "分组 ID");
+    db.prepare("DELETE FROM hidden_rate_groups WHERE site_id = ? AND group_id = ?").run(id, group);
+    return { siteId: id, groupId: group, hidden: false };
+  }
+
   function listLatestRates(options = {}) {
     const page = positiveInteger(options.page ?? 1, "页码");
     const pageSize = Math.min(500, positiveInteger(options.pageSize ?? 100, "每页数量"));
     const sort = RATE_SORTS.get(options.sortBy ?? "rate");
     if (!sort) throw new Error("不支持的倍率排序字段");
     const direction = normalizeDirection(options.sortDir ?? "asc");
+    const visibility = normalizeRateVisibility(options.visibility ?? "all");
     const where = ["r.valid_to IS NULL"];
     const params = [];
+    if (visibility === "visible") {
+      where.push("NOT EXISTS (SELECT 1 FROM hidden_rate_groups h WHERE h.site_id = r.site_id AND h.group_id = r.group_id)");
+    }
+    if (visibility === "hidden") {
+      where.push("EXISTS (SELECT 1 FROM hidden_rate_groups h WHERE h.site_id = r.site_id AND h.group_id = r.group_id)");
+    }
     if (options.siteId) { where.push("s.id = ?"); params.push(Number(options.siteId)); }
     if (options.categoryId) { where.push("s.category_id = ?"); params.push(Number(options.categoryId)); }
     if (options.platform) { where.push("r.platform = ?"); params.push(options.platform); }
@@ -572,7 +616,11 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     const base = `FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id ${clause}`;
     const total = Number(db.prepare(`SELECT COUNT(*) AS count ${base}`).get(...params).count);
     const items = db.prepare(`
-      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name
+      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name,
+        EXISTS (
+          SELECT 1 FROM hidden_rate_groups h
+          WHERE h.site_id = r.site_id AND h.group_id = r.group_id
+        ) AS is_hidden
       ${base} ORDER BY ${sort} ${direction}, r.id ASC LIMIT ? OFFSET ?
     `).all(...params, pageSize, (page - 1) * pageSize).map(mapRate);
     return { items, total, page, pageSize };
@@ -679,6 +727,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     finishRun,
     listRuns,
     saveCollection,
+    hideRateGroup,
+    restoreRateGroup,
     listLatestRates,
     getRateHistory,
     listChanges,
@@ -850,6 +900,7 @@ function mapRate(row) {
     dailyLimitUsd: row.daily_limit_usd,
     weeklyLimitUsd: row.weekly_limit_usd,
     monthlyLimitUsd: row.monthly_limit_usd,
+    hidden: Boolean(row.is_hidden),
     validFrom: row.valid_from,
     validTo: row.valid_to
   };
@@ -1039,6 +1090,12 @@ function normalizeDirection(value = "asc") {
   const direction = String(value).toLowerCase();
   if (direction !== "asc" && direction !== "desc") throw new Error("排序方向只能是 asc 或 desc");
   return direction.toUpperCase();
+}
+
+function normalizeRateVisibility(value = "all") {
+  const visibility = String(value);
+  if (!["all", "visible", "hidden"].includes(visibility)) throw new Error("不支持的倍率可见性");
+  return visibility;
 }
 
 function iso(value) {

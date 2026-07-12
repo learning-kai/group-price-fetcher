@@ -76,6 +76,43 @@ export function toJson(result) {
   return JSON.stringify(result, null, 2);
 }
 
+export function ratesToCsv(rates) {
+  if (!Array.isArray(rates)) throw new Error("倍率导出数据必须是数组");
+  const rows = [[
+    "site_name",
+    "site_url",
+    "category",
+    "group_id",
+    "group_name",
+    "platform",
+    "status",
+    "base_rate_multiplier",
+    "user_rate_multiplier",
+    "effective_rate_multiplier",
+    "rpm_limit",
+    "description",
+    "updated_at"
+  ]];
+  for (const rate of rates) {
+    rows.push([
+      rate.siteName,
+      rate.baseUrl,
+      rate.categoryName,
+      rate.groupId,
+      rate.groupName,
+      rate.platform,
+      rate.status,
+      rate.baseRateMultiplier,
+      rate.userRateMultiplier,
+      rate.effectiveRateMultiplier,
+      rate.rpmLimit,
+      rate.description,
+      rate.validFrom
+    ]);
+  }
+  return `${rows.map((row) => row.map(csvCell).join(",")).join("\n")}\n`;
+}
+
 function toCurrentRatesCsv(currentRates) {
   const rows = [
     [

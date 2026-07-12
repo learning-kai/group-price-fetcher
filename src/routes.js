@@ -154,9 +154,18 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
           pageSize: numberParam(url.searchParams, "pageSize", 100)
         }));
       }
+      if (parts.length === 6 && parts[3] === "groups" && parts[5] === "hidden") {
+        const groupId = decodeURIComponent(parts[4]);
+        if (method === "PUT") {
+          const result = repository.hideRateGroup(id, groupId);
+          if (!result) throw new RouteError("当前分组不存在", 404);
+          return ok(result);
+        }
+        if (method === "DELETE") return ok(repository.restoreRateGroup(id, groupId));
+      }
     }
     if (pathname === "/api/rates" && method === "GET") {
-      return ok(repository.listLatestRates(rateQuery(url.searchParams)));
+      return ok(repository.listLatestRates(rateQuery(url.searchParams, "visible", true)));
     }
     if (pathname === "/api/runs" && method === "GET") {
       return ok({ items: repository.listRuns({ limit: numberParam(url.searchParams, "limit", 100) }) });
@@ -184,7 +193,7 @@ function routeExternalApi({ pathname, parts, url, repository }) {
     return ok(externalPage({ ...result, items: result.items.map(externalSite) }));
   }
   if (pathname === "/api/external/v1/rates") {
-    return ok(externalPage(repository.listLatestRates(rateQuery(url.searchParams))));
+    return ok(externalPage(repository.listLatestRates(rateQuery(url.searchParams, "all"))));
   }
   if (pathname === "/api/external/v1/changes") {
     return ok(externalPage(repository.listChanges(changeQuery(url.searchParams))));
@@ -193,7 +202,7 @@ function routeExternalApi({ pathname, parts, url, repository }) {
     const siteId = parseId(parts[4]);
     requireEntity(repository.getSite(siteId), "站点");
     if (parts.length === 6 && parts[5] === "rates") {
-      return ok(externalPage(repository.listLatestRates({ ...rateQuery(url.searchParams), siteId })));
+      return ok(externalPage(repository.listLatestRates({ ...rateQuery(url.searchParams, "all"), siteId })));
     }
     if (parts.length === 6 && parts[5] === "changes") {
       return ok(externalPage(repository.listChanges({ ...changeQuery(url.searchParams), siteId })));
@@ -268,7 +277,7 @@ function siteQuery(params) {
   };
 }
 
-function rateQuery(params) {
+function rateQuery(params, defaultVisibility = "all", allowVisibility = false) {
   return {
     query: params.get("query") || "",
     siteId: params.get("siteId") || undefined,
@@ -277,6 +286,7 @@ function rateQuery(params) {
     platform: params.get("platform") || "",
     status: params.get("status") || "",
     authStatus: params.get("authStatus") || "",
+    visibility: allowVisibility ? params.get("visibility") || defaultVisibility : defaultVisibility,
     sortBy: params.get("sortBy") || "rate",
     sortDir: params.get("sortDir") || "asc",
     page: numberParam(params, "page", 1),

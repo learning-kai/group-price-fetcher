@@ -66,6 +66,59 @@ test("rates API supports combined filters, sorting and change history", async ()
   }
 });
 
+test("management API hides and restores rate groups without filtering external data", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({ name: "隐藏站", baseUrl: "https://hidden.example.com" });
+    fixture.repo.saveCollection(site.id, sampleCollection(0.02), "2026-07-13T00:00:00.000Z");
+
+    const hidden = await fixture.request("PUT", `/api/sites/${site.id}/groups/group-1/hidden`);
+    assert.equal(hidden.status, 200);
+    assert.deepEqual(hidden.body, { siteId: site.id, groupId: "group-1", hidden: true });
+
+    const visibleRates = await fixture.request("GET", "/api/rates");
+    assert.equal(visibleRates.body.total, 0);
+    const hiddenRates = await fixture.request("GET", "/api/rates?visibility=hidden");
+    assert.equal(hiddenRates.body.total, 1);
+    assert.equal(hiddenRates.body.items[0].hidden, true);
+    const invalid = await fixture.request("GET", "/api/rates?visibility=surprise");
+    assert.equal(invalid.status, 400);
+
+    const externalRates = await fixture.request("GET", "/api/external/v1/rates");
+    assert.equal(externalRates.body.pagination.total, 1);
+    assert.equal(externalRates.body.data[0].groupId, "group-1");
+
+    const restored = await fixture.request("DELETE", `/api/sites/${site.id}/groups/group-1/hidden`);
+    assert.deepEqual(restored.body, { siteId: site.id, groupId: "group-1", hidden: false });
+    const restoredAgain = await fixture.request("DELETE", `/api/sites/${site.id}/groups/group-1/hidden`);
+    assert.deepEqual(restoredAgain.body, restored.body);
+    assert.equal((await fixture.request("GET", "/api/rates")).body.total, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("hidden rate group controls reject non-loopback clients before repository access", async () => {
+  const route = createApiRouter({
+    repository: {
+      getExternalApiKeyHash() { return ""; },
+      setExternalApiKeyHash() {},
+      getSite() { throw new Error("repository should not be called"); }
+    }
+  });
+
+  for (const method of ["PUT", "DELETE"]) {
+    await assert.rejects(
+      route({
+        method,
+        url: new URL("/api/sites/1/groups/group-1/hidden", "http://localhost"),
+        remoteAddress: "192.168.1.8"
+      }),
+      (error) => error.status === 403 && error.code === "MANAGEMENT_LOCAL_ONLY"
+    );
+  }
+});
+
 test("manual refresh and explicit auth actions are routed without exposing secrets", async () => {
   const calls = [];
   const fixture = await createFixture({

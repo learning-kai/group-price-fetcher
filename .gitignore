@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Local runtime data and credentials
+data/
+profiles/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+credentials.vault
+.env
+.env.*
+!.env.example
+
+# Logs and generated output
+*.log
+coverage/
+dist/
+build/
+playwright-report/
+test-results/
+output/
+.playwright-cli/
+
+# Local tooling and editors
+.agents/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

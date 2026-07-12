@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>分组倍率控制台</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">GP</span>
+          <div><strong>倍率控制台</strong><span>Gateway Rates</span></div>
+        </div>
+
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" type="button" data-view="rates" aria-current="page"><span>01</span>最新倍率</button>
+          <button class="nav-item" type="button" data-view="changes"><span>02</span>最近变化</button>
+          <button class="nav-item" type="button" data-view="sites"><span>03</span>站点管理</button>
+          <button class="nav-item" type="button" data-view="settings"><span>04</span>采集设置</button>
+        </nav>
+
+        <div class="rail-status">
+          <span id="scheduler-indicator" class="status-light"></span>
+          <div><strong id="scheduler-label">正在连接</strong><span id="scheduler-detail">读取调度状态</span></div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p id="view-kicker">RATE INDEX</p>
+            <h1 id="view-title">最新分组倍率</h1>
+          </div>
+          <div class="top-actions">
+            <button id="refresh-all" class="icon-command" type="button" title="刷新全部启用站点" aria-label="刷新全部启用站点">↻</button>
+            <button id="open-bulk" class="secondary-command" type="button">批量添加</button>
+            <button id="open-site" class="primary-command" type="button"><span aria-hidden="true">＋</span>添加站点</button>
+          </div>
+        </header>
+
+        <section id="view-rates" class="view active" data-view-panel="rates">
+          <form id="rate-filters" class="filter-bar">
+            <label class="search-field"><span>搜索</span><input id="rate-search" type="search" placeholder="站点、分组或平台"></label>
+            <label><span>分类</span><select id="category-filter"><option value="">全部分类</option></select></label>
+            <label><span>标签</span><select id="tag-filter"><option value="">全部标签</option></select></label>
+            <label><span>平台</span><select id="platform-filter"><option value="">全部平台</option></select></label>
+            <label><span>分组状态</span><select id="group-status-filter"><option value="">全部状态</option><option value="active">active</option><option value="inactive">inactive</option></select></label>
+            <label><span>认证</span><select id="auth-filter"><option value="">全部状态</option><option value="valid">有效</option><option value="login_required">需要登录</option><option value="unknown">未验证</option></select></label>
+            <label><span>排序</span><select id="sort-field"><option value="rate">倍率</option><option value="site">站点</option><option value="group">分组</option><option value="platform">平台</option><option value="updatedAt">更新时间</option></select></label>
+            <label><span>方向</span><select id="sort-direction"><option value="asc">升序</option><option value="desc">降序</option></select></label>
+          </form>
+
+          <div id="rate-summary" class="metric-strip" aria-live="polite">
+            <div><span>当前分组</span><strong id="metric-groups">0</strong></div>
+            <div><span>覆盖站点</span><strong id="metric-sites">0</strong></div>
+            <div><span>最低倍率</span><strong id="metric-min">—</strong></div>
+            <div><span>需登录</span><strong id="metric-auth">0</strong></div>
+          </div>
+
+          <section class="data-surface" aria-label="最新倍率数据">
+            <div class="table-scroll">
+              <table class="rate-table">
+                <thead><tr><th>站点</th><th>分类</th><th>平台 / 分组</th><th>状态</th><th class="numeric">基础倍率</th><th class="numeric">实际倍率</th><th>生效时间</th><th class="actions-col">操作</th></tr></thead>
+                <tbody id="rates-body"><tr class="empty"><td colspan="8">正在加载倍率数据</td></tr></tbody>
+              </table>
+            </div>
+            <footer class="pager"><span id="rate-page-label">第 1 页</span><div><button id="page-prev" type="button" aria-label="上一页" title="上一页">←</button><button id="page-next" type="button" aria-label="下一页" title="下一页">→</button></div></footer>
+          </section>
+        </section>
+
+        <section id="view-changes" class="view" data-view-panel="changes" hidden>
+          <div class="section-tools">
+            <label><span>变化类型</span><select id="change-type-filter"><option value="">全部变化</option><option value="ratio_changed">倍率变化</option><option value="group_added">新增分组</option><option value="group_removed">删除分组</option><option value="desc_changed">说明变化</option></select></label>
+            <span id="change-site-label" class="muted" hidden></span>
+            <button id="clear-change-site" class="secondary-command" type="button" hidden>清除站点筛选</button>
+          </div>
+          <section class="data-surface" aria-label="最近变化数据">
+            <div class="table-scroll">
+              <table>
+                <thead><tr><th>时间</th><th>站点</th><th>分组</th><th>变化</th><th>原值</th><th>新值</th><th>级别</th></tr></thead>
+                <tbody id="changes-body"><tr class="empty"><td colspan="7">正在加载变化记录</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-sites" class="view" data-view-panel="sites" hidden>
+          <div class="section-tools">
+            <label class="search-field"><span>搜索站点</span><input id="site-search" type="search" placeholder="名称或 URL"></label>
+            <label><span>认证状态</span><select id="site-auth-filter"><option value="">全部</option><option value="valid">有效</option><option value="login_required">需要登录</option><option value="unknown">未验证</option></select></label>
+          </div>
+          <section class="data-surface">
+            <div class="table-scroll">
+              <table class="site-table">
+                <thead><tr><th>站点</th><th>分类 / 标签</th><th>认证</th><th>采集频率</th><th>下次运行</th><th>最近采集</th><th class="actions-col">操作</th></tr></thead>
+                <tbody id="sites-body"><tr class="empty"><td colspan="7">正在加载站点</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="view-settings" class="view settings-layout" data-view-panel="settings" hidden>
+          <section class="settings-block">
+            <header><div><p>GLOBAL</p><h2>默认采集频率</h2></div></header>
+            <form id="schedule-form" class="inline-form">
+              <label><span>分钟</span><input id="global-schedule" type="number" min="1" required></label>
+              <button class="primary-command" type="submit">保存</button>
+            </form>
+          </section>
+          <section class="settings-block">
+            <header><div><p>CATEGORIES</p><h2>站点分类</h2></div></header>
+            <form id="category-form" class="inline-form category-form">
+              <label><span>分类名称</span><input id="category-name" required></label>
+              <label><span>覆盖频率（分钟）</span><input id="category-schedule" type="number" min="1" placeholder="继承全局"></label>
+              <button class="primary-command" type="submit">添加</button>
+            </form>
+            <div id="category-list" class="category-list"></div>
+          </section>
+          <section class="settings-block">
+            <header><div><p>EXTERNAL API</p><h2>外部数据 API</h2></div></header>
+            <div class="inline-form">
+              <span id="api-key-status" class="muted">正在读取 API Key 状态</span>
+              <button id="rotate-api-key" class="primary-command" type="button">生成新 API Key</button>
+            </div>
+            <label id="api-key-result" hidden><span>新 API Key（仅显示一次）</span><input id="api-key-output" readonly></label>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="site-dialog">
+      <form id="site-form" class="dialog-form">
+        <header><div><p>SITE</p><h2 id="site-dialog-title">添加站点</h2></div><button class="dialog-close" type="button" data-close="site-dialog" aria-label="关闭">×</button></header>
+        <input id="site-id" type="hidden">
+        <label><span>站点名称</span><input id="site-name" required></label>
+        <label><span>Base URL</span><input id="site-url" type="url" placeholder="https://example.com" required></label>
+        <div class="form-grid">
+          <label><span>Provider</span><select id="site-provider" required></select></label>
+          <label><span>认证方式</span><select id="site-auth-mode" required><option value="edge-profile">Edge 登录态</option><option value="sub2api-password">sub2api 账号密码</option><option value="public">公开接口</option><option value="newapi-token">NewAPI Access Token</option></select></label>
+          <label><span>分类</span><select id="site-category"><option value="">未分类</option></select></label>
+          <label><span>采集频率（分钟）</span><input id="site-schedule" type="number" min="1" placeholder="继承分类"></label>
+        </div>
+        <div id="sub2api-credentials" class="form-grid credential-fields" hidden>
+          <label><span>登录邮箱</span><input id="credential-email" type="email" autocomplete="username"></label>
+          <label><span>登录密码</span><input id="credential-password" type="password" autocomplete="current-password"></label>
+        </div>
+        <div id="newapi-credentials" class="form-grid credential-fields" hidden>
+          <label><span>Access Token</span><input id="credential-access-token" type="password" autocomplete="off"></label>
+          <label><span>New-Api-User ID</span><input id="credential-user-id" inputmode="numeric"></label>
+        </div>
+        <span id="credential-state" class="muted"></span>
+        <label><span>标签</span><input id="site-tags" placeholder="重点, Claude, 备用"></label>
+        <label class="toggle-row"><input id="site-enabled" type="checkbox" checked><span>启用定时采集</span></label>
+        <footer><button class="secondary-command" type="button" data-close="site-dialog">取消</button><button class="primary-command" type="submit">保存站点</button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="bulk-dialog">
+      <form id="bulk-form" class="dialog-form wide-dialog">
+        <header><div><p>BULK</p><h2>批量添加站点</h2></div><button class="dialog-close" type="button" data-close="bulk-dialog" aria-label="关闭">×</button></header>
+        <label><span>每行：名称 | URL | 标签（逗号分隔）</span><textarea id="bulk-sites" rows="10" placeholder="站点 A | https://a.example.com | 稳定,重点" required></textarea></label>
+        <footer><button class="secondary-command" type="button" data-close="bulk-dialog">取消</button><button class="primary-command" type="submit">导入站点</button></footer>
+      </form>
+    </dialog>
+
+    <dialog id="history-dialog">
+      <div class="dialog-form wide-dialog">
+        <header><div><p>HISTORY</p><h2 id="history-title">倍率历史</h2></div><button class="dialog-close" type="button" data-close="history-dialog" aria-label="关闭">×</button></header>
+        <div class="table-scroll history-scroll"><table><thead><tr><th>生效时间</th><th class="numeric">基础倍率</th><th class="numeric">用户倍率</th><th class="numeric">实际倍率</th><th>有效至</th></tr></thead><tbody id="history-body"></tbody></table></div>
+      </div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" hidden></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

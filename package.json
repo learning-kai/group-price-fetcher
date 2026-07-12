@@ -1,0 +1,21 @@
+{
+  "name": "group-price-fetcher",
+  "version": "0.1.0",
+  "description": "Local tool for collecting group pricing and rate multipliers from API gateway dashboards.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
+    "cli": "node src/cli.js",
+    "test": "node --disable-warning=ExperimentalWarning --test",
+    "test:acceptance": "node --disable-warning=ExperimentalWarning --test test/acceptance.test.js",
+    "startup:install": "pwsh -NoProfile -File scripts/install-startup.ps1",
+    "startup:uninstall": "pwsh -NoProfile -File scripts/uninstall-startup.ps1"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "playwright-core": "^1.61.1"
+  }
+}

@@ -25,6 +25,7 @@ output/
 
 # Local tooling and editors
 .agents/
+.worktrees/
 .vscode/
 .idea/
 .DS_Store

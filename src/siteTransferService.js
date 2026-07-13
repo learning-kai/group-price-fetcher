@@ -5,7 +5,7 @@ import { redactSecrets } from "./security.js";
 const PAYLOAD_TYPE = "site-transfer";
 const PAYLOAD_VERSION = 1;
 const PROVIDERS = new Set(["sub2api", "newapi"]);
-const AUTH_MODES = new Set(["public", "sub2api-password", "newapi-token", "edge-profile"]);
+const AUTH_MODES = new Set(["public", "sub2api-password", "sub2api-token", "newapi-token", "edge-profile"]);
 const SITE_KEYS = new Set([
   "name",
   "baseUrl",
@@ -184,6 +184,13 @@ function validateCredentials(authMode, value, index) {
       userId: requiredString(value.userId, `第 ${index + 1} 项用户 ID`)
     };
   }
+  if (authMode === "sub2api-token") {
+    requireExactKeys(value, ["accessToken", "refreshToken"], index);
+    return {
+      accessToken: requiredString(value.accessToken, `第 ${index + 1} 项 Access Token`),
+      refreshToken: optionalString(value.refreshToken, `第 ${index + 1} 项 Refresh Token`)
+    };
+  }
   throw transferError(`第 ${index + 1} 项认证方式不接受凭据`);
 }
 
@@ -194,6 +201,12 @@ function exportCredentials(authMode, value) {
   }
   if (authMode === "newapi-token" && nonEmpty(value.accessToken) && nonEmpty(value.userId)) {
     return { accessToken: value.accessToken, userId: value.userId };
+  }
+  if (authMode === "sub2api-token" && nonEmpty(value.accessToken)) {
+    return {
+      accessToken: value.accessToken,
+      refreshToken: typeof value.refreshToken === "string" ? value.refreshToken : ""
+    };
   }
   return null;
 }
@@ -220,6 +233,11 @@ function requiredString(value, label) {
   return value.trim();
 }
 
+function optionalString(value, label) {
+  if (typeof value !== "string") throw transferError(`${label}无效`);
+  return value.trim();
+}
+
 function positiveInteger(value, label) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw transferError(`${label}无效`);
@@ -227,7 +245,7 @@ function positiveInteger(value, label) {
 }
 
 function requiresCredentials(authMode) {
-  return authMode === "sub2api-password" || authMode === "newapi-token";
+  return authMode === "sub2api-password" || authMode === "sub2api-token" || authMode === "newapi-token";
 }
 
 function hasUnknownKeys(value, allowed) {

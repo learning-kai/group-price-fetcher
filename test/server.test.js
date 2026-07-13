@@ -18,6 +18,17 @@ test("Linux browser adapter reports that Edge profile authentication is unavaila
   await adapter.close();
 });
 
+test("status API reports whether browser authentication is supported", async () => {
+  const fixture = await createFixture({ browserAuthSupported: false });
+  try {
+    const status = await fixture.request("GET", "/api/status");
+    assert.equal(status.status, 200);
+    assert.equal(status.body.browserAuthSupported, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("management API supports category, site, tag, schedule and pagination workflows", async () => {
   const fixture = await createFixture();
   try {
@@ -383,6 +394,65 @@ test("local site transfer endpoints export an artifact and import its encrypted 
   }
 });
 
+test("browser session capture returns tokens once with no-store caching", async () => {
+  const calls = [];
+  const fixture = await createFixture({
+    browserAuthSupported: true,
+    authManager: {
+      async captureBrowserSession(site) {
+        calls.push(site.id);
+        return { accessToken: "portable-access", refreshToken: "portable-refresh" };
+      }
+    }
+  });
+  try {
+    const site = fixture.repo.createSite({
+      name: "提取站",
+      baseUrl: "https://capture.example.com",
+      providerId: "sub2api",
+      authMode: "edge-profile"
+    });
+    const response = await fetch(`${fixture.baseUrl}/api/sites/${site.id}/capture-browser-session`, {
+      method: "POST"
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await response.json(), {
+      accessToken: "portable-access",
+      refreshToken: "portable-refresh"
+    });
+    assert.deepEqual(calls, [site.id]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("browser session capture remains protected by loopback management access", async () => {
+  let calls = 0;
+  const route = createApiRouter({
+    repository: {
+      getExternalApiKeyHash() { return ""; },
+      setExternalApiKeyHash() {},
+      getSite() { throw new Error("repository should not be called"); }
+    },
+    authManager: {
+      async captureBrowserSession() { calls += 1; }
+    },
+    browserAuthSupported: true
+  });
+
+  await assert.rejects(
+    route({
+      method: "POST",
+      url: new URL("/api/sites/1/capture-browser-session", "http://localhost"),
+      remoteAddress: "192.168.1.8"
+    }),
+    (error) => error.status === 403 && error.code === "MANAGEMENT_LOCAL_ONLY"
+  );
+  assert.equal(calls, 0);
+});
+
 test("export router returns exactly four business download headers", async () => {
   const route = createApiRouter({
     repository: {
@@ -511,6 +581,7 @@ async function createFixture(overrides = {}) {
     : overrides.exportService;
   const services = {
     repository: repo,
+    browserAuthSupported: overrides.browserAuthSupported ?? false,
     collector: overrides.collector ?? { async collectSite() { return sampleCollection(0.02); } },
     authManager: overrides.authManager ?? {
       async login() { return { token: "hidden", source: "profile:interactive" }; },

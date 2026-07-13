@@ -17,7 +17,7 @@
 
 - 采集 sub2api 风格接口和 NewAPI 的分组倍率。
 - 可见的 Uling19 Provider 已删除，仅保留 sub2api 和 NewAPI。SQLite v4 会自动把旧 `uling-gateway` 站点迁移为 `sub2api`，不改变 URL、站点记录或倍率历史。
-- 支持 sub2api 邮箱密码、NewAPI 公开/Token 增强采集，以及持久化 Edge Profile 兜底。
+- 支持 sub2api 邮箱密码和可移植 Token、NewAPI 公开/Token 增强采集，以及持久化 Edge Profile 兜底。
 - 使用 Windows DPAPI 或 Linux 服务端 AES-256-GCM Vault 加密保存账号凭据，SQLite 只保存元数据。
 - 按站点、分类、标签、平台、分组状态和认证状态筛选排序。
 - 支持每站点倍率换算系数和本地隐藏分组，不重写已采集历史。
@@ -65,7 +65,13 @@ npm install
 npm start
 ```
 
-每次重启必须使用同一 Vault Key；密钥丢失或更换后，已有凭据库无法解密。Linux 支持公开接口、NewAPI Token 和 sub2api 邮箱密码认证，Edge Profile 认证仍仅支持 Windows。公网部署时应让 Node 继续监听 `127.0.0.1`，并在反向代理层强制 HTTPS 和登录认证。
+每次重启必须使用同一 Vault Key；密钥丢失或更换后，已有凭据库无法解密。Linux 支持公开接口、NewAPI Token、sub2api 邮箱密码和可移植 sub2api Token 认证；Edge Profile 认证和登录态提取仍仅支持 Windows。公网部署时应让 Node 继续监听 `127.0.0.1`，并在反向代理层强制 HTTPS 和登录认证。
+
+### 可移植 sub2api Token 流程
+
+在 Windows 上，先让现有 sub2api 站点通过专用 Edge Profile 完成登录，然后编辑该站点并点击“提取 Edge 登录态”。Access Token 和可选的 Refresh Token 只会填入敏感输入框一次；保存站点后才会切换为 `sub2api-token`。在 Linux 上可以编辑站点并直接粘贴这两个字段，也可以导入 Windows 生成的加密 `.gpftransfer`。
+
+采集器会复用仍有效的 Access Token。Access Token 过期且存在 Refresh Token 时，会自动刷新并把轮换后的 Token 写回加密凭据库；没有 Refresh Token 或刷新失败时，站点会变为 `login_required`，需要在 Windows 重新提取或手动更新。普通状态、站点、导出和采集 API 都不会返回原始 Token。
 
 ## 外部 API
 
@@ -96,7 +102,7 @@ GET /api/external/v1/sites/:id/groups/:groupId/history
 
 - 普通 JSON/CSV 仅包含公开站点数据、当前倍率和变化数据，不包含登录凭据或 API Key 哈希，不适合完整灾备。JSON 包含公开站点、当前倍率和变化集合；CSV 包含当前倍率记录。
 - `.gpfbackup` 是完整可移植备份，包含已执行 checkpoint 的 SQLite 数据库和已保存凭据，使用 scrypt（`N=32768`、`r=8`、`p=1`）派生密钥并以 AES-256-GCM 加密。Edge Profile 和浏览器 Cookie 不包含在内。
-- `.gpftransfer` 只包含可移植的站点配置和账号凭据。导入时按规范化 URL 匹配并覆盖目标配置，但不删除倍率历史；交换包未携带凭据时会清除目标端旧凭据；Edge 站点导入后保持禁用，等待本机重新认证。
+- `.gpftransfer` 只包含可移植的站点配置和账号凭据，包括可移植的 sub2api Access/Refresh Token。导入时按规范化 URL 匹配并覆盖目标配置，但不删除倍率历史；交换包未携带凭据时会清除目标端旧凭据；Edge 站点导入后保持禁用，等待本机重新认证。
 
 备份密码至少需要 10 个字符。密码不会被保存，丢失后无法恢复。
 
@@ -148,7 +154,7 @@ npm run test:acceptance
 Linux 使用 `GROUP_PRICE_FETCHER_HOME`（例如 `/var/lib/group-price-fetcher`），并要求配置 `GROUP_PRICE_FETCHER_VAULT_KEY`。
 
 - 密码和 NewAPI Token 使用 Windows DPAPI CurrentUser 范围加密，或使用部署 Vault Key 进行 Linux AES-256-GCM 加密。
-- Access Token、Refresh Token、Cookie 和密码不会写入 SQLite、日志、普通 JSON/CSV 导出或 API 响应；已保存凭据只会进入密码加密的 `.gpfbackup`。
+- Access Token、Refresh Token、Cookie 和密码不会写入 SQLite、日志、普通 JSON/CSV 导出或普通 API 响应；已保存凭据只会进入密码加密的 `.gpfbackup` 和 `.gpftransfer`。唯一例外是本机用户显式触发、带 `no-store` 的 Windows 一次性提取响应。
 - API Key 只保存 SHA-256 哈希。
 - 普通 JSON/CSV 不包含 API Key 哈希，也不是完整备份。`.gpfbackup` 用于完整迁移，`.gpftransfer` 只迁移站点配置与凭据；两者都不包含 Edge Profile 和 Cookie。
 - `.gpfbackup` 密码丢失后无法恢复。

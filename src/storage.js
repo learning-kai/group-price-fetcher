@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { normalizeBaseUrl } from "./httpClient.js";
 
 const CREDENTIAL_KEY_RE = /token|password|cookie|credential|secret/i;
-const AUTH_MODES = new Set(["public", "sub2api-password", "newapi-token", "edge-profile"]);
+const AUTH_MODES = new Set(["public", "sub2api-password", "sub2api-token", "newapi-token", "edge-profile"]);
 const SITE_SORTS = new Map([
   ["name", "s.name"],
   ["baseUrl", "s.base_url"],

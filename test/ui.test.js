@@ -57,6 +57,36 @@ test("dashboard script uses management APIs and explicit auth actions", async ()
   assert.match(script, /safeHandler/);
 });
 
+test("site editor supports portable sub2api tokens and Windows session capture", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+
+  assert.match(html, /<option[^>]*value=["']sub2api-token["'][^>]*>/);
+  for (const id of [
+    "sub2api-token-credentials",
+    "credential-sub2api-access-token",
+    "credential-sub2api-refresh-token",
+    "capture-browser-session"
+  ]) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+  }
+  for (const id of ["credential-sub2api-access-token", "credential-sub2api-refresh-token"]) {
+    const input = html.match(new RegExp(`<input[^>]*id=["']${id}["'][^>]*>`))?.[0] ?? "";
+    assert.match(input, /type=["']password["']/i);
+    assert.doesNotMatch(input, /\svalue=/i);
+  }
+
+  assert.ok(script.includes("/capture-browser-session"));
+  assert.match(script, /browserAuthSupported/);
+  assert.match(script, /state\.browserAuthSupported[\s\S]*?edge-profile/);
+  assert.match(script, /#site-auth-mode["']\)\.value\s*=\s*["']sub2api-token["']/);
+  assert.match(script, /#credential-sub2api-access-token["']\)\.value\s*=\s*tokens\.accessToken/);
+  assert.match(script, /#credential-sub2api-refresh-token["']\)\.value\s*=\s*tokens\.refreshToken/);
+  assert.match(script, /authMode === ["']sub2api-token["'][\s\S]*?accessToken[\s\S]*?refreshToken/);
+  assert.match(script, /function clearSiteCredentialFields\(\)[\s\S]*?#credential-sub2api-access-token[\s\S]*?#credential-sub2api-refresh-token/);
+  assert.match(script, /closeSiteDialog/);
+});
+
 test("latest rates can switch hidden groups and persist hide or restore actions", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");

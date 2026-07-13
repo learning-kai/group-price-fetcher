@@ -233,6 +233,52 @@ test("NewAPI token mode returns raw Authorization and New-Api-User headers", asy
   });
 });
 
+test("sub2api token mode reuses a valid stored access token", async () => {
+  const writes = [];
+  const manager = createAuthManager({
+    repository: fakeRepository([]),
+    credentialStore: {
+      async get(reference) {
+        assert.equal(reference, "site:7");
+        return { accessToken: "portable-access", refreshToken: "portable-refresh" };
+      },
+      async set(reference, value) { writes.push({ reference, value }); }
+    },
+    browserAdapter: fakeBrowser({}),
+    fetchImpl: authFetch({ validTokens: ["portable-access"] })
+  });
+
+  const resolved = await manager.getAccess({ ...site, authMode: "sub2api-token" });
+
+  assert.deepEqual(resolved, { token: "portable-access", headers: {}, source: "token:access" });
+  assert.deepEqual(writes, []);
+});
+
+test("sub2api token mode refreshes an expired token and persists the rotation", async () => {
+  const writes = [];
+  const manager = createAuthManager({
+    repository: fakeRepository([]),
+    credentialStore: {
+      async get() { return { accessToken: "expired", refreshToken: "refresh-1" }; },
+      async set(reference, value) { writes.push({ reference, value }); }
+    },
+    browserAdapter: fakeBrowser({}),
+    fetchImpl: authFetch({
+      validTokens: ["access-2"],
+      refreshedAccess: "access-2",
+      refreshedRefresh: "refresh-2"
+    })
+  });
+
+  const resolved = await manager.getAccess({ ...site, authMode: "sub2api-token" });
+
+  assert.deepEqual(resolved, { token: "access-2", headers: {}, source: "token:refresh" });
+  assert.deepEqual(writes, [{
+    reference: "site:7",
+    value: { accessToken: "access-2", refreshToken: "refresh-2" }
+  }]);
+});
+
 test("credential configuration stores secrets outside repository metadata", async () => {
   const writes = [];
   const configs = [];
@@ -270,6 +316,79 @@ test("credential configuration stores secrets outside repository metadata", asyn
     credentialRef: "site:7"
   }]);
   assert.equal(JSON.stringify(configs).includes("plain-secret"), false);
+});
+
+test("sub2api token credential configuration accepts an optional refresh token", async () => {
+  const writes = [];
+  const configs = [];
+  const repository = {
+    ...fakeRepository([]),
+    setSiteAuthConfig(siteId, config) {
+      configs.push({ siteId, ...config });
+      return { ...site, authMode: config.authMode, credentialConfigured: true };
+    }
+  };
+  const manager = createAuthManager({
+    repository,
+    credentialStore: {
+      async set(reference, credentials) { writes.push({ reference, credentials }); },
+      async delete() { return true; }
+    },
+    browserAdapter: fakeBrowser({})
+  });
+
+  await manager.configureCredentials(site, {
+    authMode: "sub2api-token",
+    accessToken: "portable-access",
+    refreshToken: ""
+  });
+
+  assert.deepEqual(writes, [{
+    reference: "site:7",
+    credentials: { accessToken: "portable-access", refreshToken: "" }
+  }]);
+  assert.deepEqual(configs, [{
+    siteId: 7,
+    authMode: "sub2api-token",
+    username: "token",
+    credentialRef: "site:7"
+  }]);
+});
+
+test("browser session capture returns tokens without changing site configuration", async () => {
+  let configWrites = 0;
+  const repository = {
+    ...fakeRepository([]),
+    setSiteAuthConfig() { configWrites += 1; }
+  };
+  const manager = createAuthManager({
+    repository,
+    browserAdapter: fakeBrowser({ accessToken: "edge-access", refreshToken: "edge-refresh" }),
+    fetchImpl: authFetch({ validTokens: ["edge-access"] })
+  });
+  const edgeSite = { ...site, providerId: "sub2api", authMode: "edge-profile" };
+
+  const captured = await manager.captureBrowserSession(edgeSite);
+
+  assert.deepEqual(captured, { accessToken: "edge-access", refreshToken: "edge-refresh" });
+  assert.equal(configWrites, 0);
+});
+
+test("browser session capture rejects unsupported providers and auth modes", async () => {
+  const manager = createAuthManager({
+    repository: fakeRepository([]),
+    browserAdapter: fakeBrowser({ accessToken: "edge-access", refreshToken: "edge-refresh" }),
+    fetchImpl: authFetch({ validTokens: ["edge-access"] })
+  });
+
+  await assert.rejects(
+    () => manager.captureBrowserSession({ ...site, providerId: "newapi", authMode: "edge-profile" }),
+    (error) => error instanceof AuthError && error.code === "BROWSER_SESSION_CAPTURE_UNSUPPORTED"
+  );
+  await assert.rejects(
+    () => manager.captureBrowserSession({ ...site, providerId: "sub2api", authMode: "public" }),
+    (error) => error instanceof AuthError && error.code === "BROWSER_SESSION_CAPTURE_UNSUPPORTED"
+  );
 });
 
 function fakeRepository(statuses) {

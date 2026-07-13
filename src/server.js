@@ -57,6 +57,7 @@ export function createDefaultServices(options = {}) {
   });
   return {
     paths,
+    browserAuthSupported: process.platform === "win32",
     repository,
     authManager,
     exportService,
@@ -83,7 +84,7 @@ export function createBrowserAdapter({ profileDir, platform = process.platform }
 }
 
 function browserAuthUnavailable() {
-  return Object.assign(new Error("浏览器登录和 Edge Profile 导入仅支持 Windows；Linux 请使用公开模式、NewAPI Token 或 sub2api 邮箱密码认证"), {
+  return Object.assign(new Error("浏览器登录、Edge Profile 导入和登录态提取仅支持 Windows；Linux 请使用公开模式、Token 或邮箱密码认证"), {
     code: "BROWSER_AUTH_UNAVAILABLE",
     status: 501
   });
@@ -113,7 +114,7 @@ export function createServer(services = createDefaultServices()) {
       });
       if (routed) {
         if (Buffer.isBuffer(routed.body)) return sendBuffer(res, routed.body, routed.status, routed.headers);
-        return sendJson(res, routed.body, routed.status);
+        return sendJson(res, routed.body, routed.status, routed.headers);
       }
 
       if (req.method !== "GET") return sendJson(res, { error: "Method Not Allowed" }, 405);
@@ -187,15 +188,16 @@ async function serveStatic(requestUrl, res) {
   }
 }
 
-function sendJson(res, payload, status = 200) {
+function sendJson(res, payload, status = 200, headers = {}) {
   if (status === 204) {
-    res.writeHead(204);
+    res.writeHead(204, headers);
     return res.end();
   }
   const text = JSON.stringify(payload);
   res.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
-    "Content-Length": Buffer.byteLength(text)
+    "Content-Length": Buffer.byteLength(text),
+    ...headers
   });
   res.end(text);
 }

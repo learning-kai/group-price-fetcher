@@ -35,6 +35,9 @@ export function createAuthManager({
       if (authMode === "sub2api-password") {
         return getPasswordAccess(site, options);
       }
+      if (authMode === "sub2api-token") {
+        return getStoredTokenAccess(site, options);
+      }
       if (authMode === "newapi-token") {
         const credentials = await requireCredentials(site);
         if (!credentials.accessToken || !credentials.userId) {
@@ -78,6 +81,9 @@ export function createAuthManager({
   }
 
   async function login(site) {
+    if (site.authMode === "sub2api-token") {
+      return getAccess(site);
+    }
     if ((site.authMode ?? "edge-profile") !== "edge-profile") {
       return getAccess(site, { forceRefresh: true });
     }
@@ -126,6 +132,21 @@ export function createAuthManager({
     });
   }
 
+  async function captureBrowserSession(site) {
+    if (site.providerId !== "sub2api" || (site.authMode ?? "edge-profile") !== "edge-profile") {
+      throw new AuthError("仅支持从 sub2api 的 Edge Profile 提取登录态", {
+        code: "BROWSER_SESSION_CAPTURE_UNSUPPORTED",
+        status: 400
+      });
+    }
+    const access = await getAccess(site);
+    const state = await browserAdapter.readState(site);
+    return {
+      accessToken: access.token,
+      refreshToken: state.refreshToken ?? ""
+    };
+  }
+
   async function configureCredentials(site, input) {
     if (!credentialStore) throw new AuthError("凭据库未配置", { code: "CREDENTIAL_STORE_MISSING", status: 500 });
     const reference = `site:${site.id}`;
@@ -142,6 +163,11 @@ export function createAuthManager({
       const userId = requiredCredential(input.userId, "用户 ID");
       credentials = { accessToken, userId };
       username = `user:${userId}`;
+    } else if (authMode === "sub2api-token") {
+      const accessToken = requiredCredential(input.accessToken, "Access Token");
+      const refreshToken = String(input.refreshToken ?? "").trim();
+      credentials = { accessToken, refreshToken };
+      username = "token";
     } else {
       throw new AuthError("该认证方式不接受凭据", { code: "AUTH_MODE_HAS_NO_CREDENTIALS", status: 400 });
     }
@@ -188,6 +214,24 @@ export function createAuthManager({
     return { token: session.accessToken, headers: {}, source: "password:login" };
   }
 
+  async function getStoredTokenAccess(site, options) {
+    const credentials = await requireCredentials(site);
+    if (!options.forceRefresh && credentials.accessToken
+      && (await validateToken(site.baseUrl, credentials.accessToken, fetchImpl)).ok) {
+      repository.recordAuthStatus(site.id, { status: "valid", source: "token:access", error: "" });
+      return { token: credentials.accessToken, headers: {}, source: "token:access" };
+    }
+    if (credentials.refreshToken) {
+      const refreshed = await refreshToken(site.baseUrl, credentials.refreshToken, fetchImpl);
+      if (refreshed?.accessToken) {
+        await credentialStore.set(`site:${site.id}`, refreshed);
+        repository.recordAuthStatus(site.id, { status: "valid", source: "token:refresh", error: "" });
+        return { token: refreshed.accessToken, headers: {}, source: "token:refresh" };
+      }
+    }
+    throw loginRequired(site, "sub2api Token 已过期，需要从 Windows 重新提取");
+  }
+
   async function requireCredentials(site) {
     if (!credentialStore) throw loginRequired(site, "凭据库未配置");
     const credentials = await credentialStore.get(`site:${site.id}`);
@@ -204,6 +248,7 @@ export function createAuthManager({
     getAccess,
     login,
     importFromEdge,
+    captureBrowserSession,
     configureCredentials,
     clearCredentials,
     close: () => mutex(async () => {

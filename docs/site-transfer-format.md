@@ -51,7 +51,7 @@
 }
 ```
 
-`sub2api-password` 的凭据字段固定为 `email`、`password`；`newapi-token` 固定为 `accessToken`、`userId`。`public` 和 `edge-profile` 的 `credentials` 必须是 `null`。
+`sub2api-password` 的凭据字段固定为 `email`、`password`；`sub2api-token` 固定为 `accessToken`、`refreshToken`，其中 Access Token 必填、Refresh Token 可以是空字符串；`newapi-token` 固定为 `accessToken`、`userId`。`public` 和 `edge-profile` 的 `credentials` 必须是 `null`。
 
 导入以规范化后的 `baseUrl` 判断同一站点：相同 URL 覆盖配置和凭据，不删除倍率历史。交换包中没有凭据时会清除目标端旧凭据。`edge-profile` 无法跨平台迁移，导入后会禁用站点并要求重新登录。
 

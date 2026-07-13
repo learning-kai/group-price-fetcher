@@ -166,7 +166,7 @@
         <label><span>Base URL</span><input id="site-url" type="url" placeholder="https://example.com" required></label>
         <div class="form-grid">
           <label><span>Provider</span><select id="site-provider" required></select></label>
-          <label><span>认证方式</span><select id="site-auth-mode" required><option value="edge-profile">Edge 登录态</option><option value="sub2api-password">sub2api 账号密码</option><option value="public">公开接口</option><option value="newapi-token">NewAPI Access Token</option></select></label>
+          <label><span>认证方式</span><select id="site-auth-mode" required><option value="edge-profile">Edge 登录态</option><option value="sub2api-password">sub2api 账号密码</option><option value="sub2api-token">sub2api Token</option><option value="public">公开接口</option><option value="newapi-token">NewAPI Access Token</option></select></label>
           <label><span>分类</span><select id="site-category"><option value="">未分类</option></select></label>
           <label><span>采集频率（分钟）</span><input id="site-schedule" type="number" min="1" placeholder="继承分类"></label>
           <label><span>倍率换算系数</span><input id="site-rate-conversion-factor" type="number" min="0.000001" step="any" value="1" required></label>
@@ -179,6 +179,11 @@
           <label><span>Access Token</span><input id="credential-access-token" type="password" autocomplete="off"></label>
           <label><span>New-Api-User ID</span><input id="credential-user-id" inputmode="numeric"></label>
         </div>
+        <div id="sub2api-token-credentials" class="form-grid credential-fields" hidden>
+          <label><span>Access Token</span><input id="credential-sub2api-access-token" type="password" autocomplete="off"></label>
+          <label><span>Refresh Token（可选）</span><input id="credential-sub2api-refresh-token" type="password" autocomplete="off"></label>
+        </div>
+        <button id="capture-browser-session" class="secondary-command" type="button" hidden>提取 Edge 登录态</button>
         <span id="credential-state" class="muted"></span>
         <label><span>标签</span><input id="site-tags" placeholder="重点, Claude, 备用"></label>
         <label class="toggle-row"><input id="site-enabled" type="checkbox" checked><span>启用定时采集</span></label>

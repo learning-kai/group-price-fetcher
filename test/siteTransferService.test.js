@@ -159,6 +159,80 @@ test("site transfer import overwrites by normalized URL and preserves local rate
   }
 });
 
+test("portable sub2api tokens round-trip between encrypted site transfers", async () => {
+  const source = createFixture("2026-07-13T09:10:11.000Z");
+  const destination = createFixture();
+  try {
+    const site = source.repository.createSite({
+      name: "便携 Token 站",
+      baseUrl: "https://portable.example.com",
+      providerId: "sub2api",
+      authMode: "sub2api-token"
+    });
+    await source.authManager.configureCredentials(site, {
+      authMode: "sub2api-token",
+      accessToken: "portable-access",
+      refreshToken: "portable-refresh"
+    });
+
+    const artifact = await source.service.exportTransfer(PASSWORD);
+    assert.equal(artifact.body.includes("portable-access"), false);
+    assert.equal(artifact.body.includes("portable-refresh"), false);
+    const payload = await decryptBackup(artifact.body, PASSWORD);
+    assert.deepEqual(payload.sites[0].credentials, {
+      accessToken: "portable-access",
+      refreshToken: "portable-refresh"
+    });
+
+    assert.deepEqual(await destination.service.importTransfer(artifact.body, PASSWORD), {
+      created: 1,
+      overwritten: 0,
+      needsCredentials: 0,
+      failed: 0,
+      errors: []
+    });
+    const imported = destination.repository.getSiteByBaseUrl("https://portable.example.com");
+    assert.equal(imported.authMode, "sub2api-token");
+    assert.deepEqual(await destination.credentialStore.get(`site:${imported.id}`), {
+      accessToken: "portable-access",
+      refreshToken: "portable-refresh"
+    });
+  } finally {
+    source.close();
+    destination.close();
+  }
+});
+
+test("portable sub2api token transfer rejects unknown credential fields", async () => {
+  const fixture = createFixture();
+  try {
+    const transfer = await encryptBackup({
+      payloadType: "site-transfer",
+      payloadVersion: 1,
+      createdAt: "2026-07-13T02:00:00.000Z",
+      sites: [{
+        name: "字段异常站",
+        baseUrl: "https://invalid-token.example.com",
+        providerId: "sub2api",
+        categoryName: null,
+        tags: [],
+        scheduleMinutes: null,
+        enabled: true,
+        rateConversionFactor: 1,
+        authMode: "sub2api-token",
+        credentials: { accessToken: "access", refreshToken: "", cookie: "must-not-pass" }
+      }]
+    }, PASSWORD);
+
+    await assert.rejects(
+      () => fixture.service.importTransfer(transfer, PASSWORD),
+      (error) => error.code === "TRANSFER_PAYLOAD_INVALID" && /凭据字段/.test(error.message)
+    );
+  } finally {
+    fixture.close();
+  }
+});
+
 test("site transfer rejects wrong passwords and invalid payloads before changing sites", async () => {
   const fixture = createFixture();
   try {

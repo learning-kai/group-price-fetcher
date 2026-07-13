@@ -17,7 +17,7 @@ Gateway pricing is often scattered across authenticated dashboards with incompat
 
 - Collects group multipliers from sub2api-style and NewAPI endpoints.
 - Removes the visible Uling19 Provider, leaving sub2api and NewAPI. SQLite schema v4 automatically migrates legacy `uling-gateway` sites to `sub2api` without changing their URLs, site records, or rate history.
-- Supports sub2api email/password login, NewAPI public and token-enhanced collection, and a persistent Edge profile fallback.
+- Supports sub2api email/password and portable Token authentication, NewAPI public and token-enhanced collection, and a persistent Edge profile fallback.
 - Encrypts saved credentials with Windows DPAPI or a server-side Linux AES-256-GCM vault; SQLite stores metadata only.
 - Sorts and filters rates by site, category, tag, platform, group status, and authentication status.
 - Supports per-site rate conversion factors and locally hidden groups without rewriting collected history.
@@ -65,7 +65,13 @@ npm install
 npm start
 ```
 
-Keep the same vault key across restarts; losing or rotating it makes the existing credential vault unreadable. Linux supports public, NewAPI token, and sub2api password authentication. Edge Profile authentication remains Windows-only. For public hosting, keep Node bound to `127.0.0.1` and require HTTPS plus authentication at the reverse proxy.
+Keep the same vault key across restarts; losing or rotating it makes the existing credential vault unreadable. Linux supports public, NewAPI token, sub2api password, and portable sub2api Token authentication. Edge Profile authentication and extraction remain Windows-only. For public hosting, keep Node bound to `127.0.0.1` and require HTTPS plus authentication at the reverse proxy.
+
+### Portable sub2api Token workflow
+
+On Windows, log in to an existing sub2api site with its dedicated Edge Profile, edit that site, and select **Extract Edge session**. The returned Access Token and optional Refresh Token are filled into sensitive fields once; save the site to switch it to `sub2api-token`. On Linux, edit the site and paste the same fields directly, or import an encrypted `.gpftransfer` created on Windows.
+
+The collector reuses a valid Access Token. If it expires and a Refresh Token is present, the collector rotates the tokens and writes the replacement back to the encrypted credential vault. If refresh is unavailable or rejected, the site becomes `login_required` and must be extracted again on Windows or updated manually. Raw tokens are not returned by ordinary status, site, export, or collection APIs.
 
 ## External API
 
@@ -96,7 +102,7 @@ Settings provides three different export paths:
 
 - Ordinary JSON/CSV exports contain only public site data, current rates, and change data. They contain no login credentials or API key hash and are not suitable for complete disaster recovery. JSON contains the public site, current-rate, and change collections; CSV contains current-rate rows.
 - A `.gpfbackup` file is a complete portable backup. It contains a checkpointed SQLite database and saved credentials, encrypted with scrypt (`N=32768`, `r=8`, `p=1`) and AES-256-GCM. The Edge Profile and browser cookies are not included.
-- A `.gpftransfer` file contains only portable site configuration and account credentials. Import matches normalized URLs, overwrites the destination configuration without deleting rate history, clears credentials omitted by the package, and disables Edge-backed sites until they are authenticated locally.
+- A `.gpftransfer` file contains only portable site configuration and account credentials, including portable sub2api Access/Refresh Tokens. Import matches normalized URLs, overwrites the destination configuration without deleting rate history, clears credentials omitted by the package, and disables Edge-backed sites until they are authenticated locally.
 
 The backup password must contain at least 10 characters. It is never stored and cannot be recovered if lost.
 
@@ -148,7 +154,7 @@ Runtime data lives outside the repository:
 Linux uses `GROUP_PRICE_FETCHER_HOME` (for example `/var/lib/group-price-fetcher`) and requires `GROUP_PRICE_FETCHER_VAULT_KEY`.
 
 - Passwords and NewAPI tokens are encrypted with Windows DPAPI CurrentUser scope or Linux AES-256-GCM using the deployment vault key.
-- Access tokens, refresh tokens, cookies, and passwords are excluded from SQLite, logs, ordinary JSON/CSV exports, and API responses. Saved credentials are included only inside the password-encrypted `.gpfbackup` format.
+- Access tokens, refresh tokens, cookies, and passwords are excluded from SQLite, logs, ordinary JSON/CSV exports, and ordinary API responses. Saved credentials are included only inside password-encrypted `.gpfbackup` and `.gpftransfer` files; the explicit Windows extraction response is a one-time, `no-store` exception initiated by the local user.
 - API keys are stored as SHA-256 hashes.
 - Ordinary JSON/CSV exports never include the API key hash and are not complete backups. `.gpfbackup` archives are portable; `.gpftransfer` moves only site configuration and credentials. Neither format includes Edge Profile state or cookies.
 - A lost `.gpfbackup` password cannot be recovered.

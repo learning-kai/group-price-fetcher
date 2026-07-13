@@ -12,7 +12,7 @@ export class RouteError extends Error {
   }
 }
 
-export function createApiRouter({ repository, collector, authManager, scheduler, exportService, siteTransferService, apiAuth = null }) {
+export function createApiRouter({ repository, collector, authManager, scheduler, exportService, siteTransferService, browserAuthSupported = false, apiAuth = null }) {
   const externalAuth = apiAuth ?? createExternalApiAuth({
     getHash: () => repository.getExternalApiKeyHash(),
     setHash: (hash) => repository.setExternalApiKeyHash(hash)
@@ -59,7 +59,8 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
     if (method === "GET" && pathname === "/api/status") {
       return ok({
         scheduler: scheduler.status(),
-        globalScheduleMinutes: repository.getGlobalSchedule()
+        globalScheduleMinutes: repository.getGlobalSchedule(),
+        browserAuthSupported
       });
     }
     if (method === "GET" && pathname === "/api/providers") {
@@ -151,6 +152,19 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
           ? await collector.probeSite(site, { token: result.token })
           : null;
         return ok({ source: result.source, compatibility });
+      }
+      if (parts.length === 4 && method === "POST" && parts[3] === "capture-browser-session") {
+        if (!browserAuthSupported) {
+          throw new AuthError("浏览器登录态提取仅支持 Windows", {
+            code: "BROWSER_AUTH_UNAVAILABLE",
+            status: 501
+          });
+        }
+        return {
+          status: 200,
+          body: await authManager.captureBrowserSession(site),
+          headers: { "Cache-Control": "no-store" }
+        };
       }
       if (parts.length === 4 && method === "GET" && parts[3] === "history") {
         const groupId = url.searchParams.get("groupId");

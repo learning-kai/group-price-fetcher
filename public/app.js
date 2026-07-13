@@ -8,6 +8,7 @@ const state = {
   changeSiteId: null,
   sites: { items: [], total: 0, page: 1, pageSize: 200 },
   editingSite: null,
+  browserAuthSupported: false,
   loading: false
 };
 
@@ -51,10 +52,15 @@ function bindEvents() {
   $("#transfer-import-form").addEventListener("submit", safeHandler(importSiteTransfer));
   $("#site-provider").addEventListener("change", handleProviderChange);
   $("#site-auth-mode").addEventListener("change", updateCredentialFields);
+  $("#capture-browser-session").addEventListener("click", safeHandler(captureBrowserSession));
   $("#sites-body").addEventListener("click", safeHandler(handleSiteAction));
   $("#rates-body").addEventListener("click", safeHandler(handleRateAction));
   $("#category-list").addEventListener("click", safeHandler(handleCategoryAction));
-  $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
+  $$('[data-close]').forEach((button) => button.addEventListener("click", () => {
+    if (button.dataset.close === "site-dialog") closeSiteDialog();
+    else $(`#${button.dataset.close}`).close();
+  }));
+  $("#site-dialog").addEventListener("close", clearSiteCredentialFields);
 }
 
 async function switchView(view) {
@@ -89,6 +95,7 @@ async function loadStatus() {
   $("#scheduler-label").textContent = status.scheduler.started ? "调度器运行中" : "调度器待启动";
   $("#scheduler-detail").textContent = `${status.scheduler.runningSiteIds.length} 个站点采集中`;
   $("#global-schedule").value = status.globalScheduleMinutes;
+  state.browserAuthSupported = Boolean(status.browserAuthSupported);
 }
 
 async function loadReferenceData() {
@@ -229,7 +236,7 @@ function renderSites() {
         <td class="time-cell">${formatDate(site.lastCollectedAt)}</td>
         <td class="row-actions site-actions">
           <button type="button" data-action="refresh" data-id="${site.id}" title="立即刷新">↻</button>
-          ${site.authMode === "edge-profile" ? `<button type="button" data-action="login" data-id="${site.id}">登录</button><button type="button" data-action="import-edge" data-id="${site.id}">导入</button>` : site.authMode !== "public" ? `<button type="button" data-action="login" data-id="${site.id}">验证</button>` : ""}
+          ${site.authMode === "edge-profile" ? state.browserAuthSupported ? `<button type="button" data-action="login" data-id="${site.id}">登录</button><button type="button" data-action="import-edge" data-id="${site.id}">导入</button>` : "" : site.authMode !== "public" ? `<button type="button" data-action="login" data-id="${site.id}">验证</button>` : ""}
           <button type="button" data-action="changes" data-id="${site.id}">变化</button>
           <button type="button" data-action="edit" data-id="${site.id}">编辑</button>
           <button class="danger" type="button" data-action="delete" data-id="${site.id}" title="删除站点">×</button>
@@ -298,17 +305,14 @@ function openSiteDialog(site = null) {
   $("#site-id").value = site?.id ?? "";
   $("#site-name").value = site?.name ?? "";
   $("#site-url").value = site?.baseUrl ?? "";
-  $("#site-provider").value = site?.providerId ?? "uling-gateway";
+  $("#site-provider").value = site?.providerId ?? state.providers[0]?.id ?? "sub2api";
   $("#site-auth-mode").value = site?.authMode ?? defaultAuthMode($("#site-provider").value);
   $("#site-category").value = site?.categoryId ?? "";
   $("#site-schedule").value = site?.scheduleMinutes ?? "";
   $("#site-rate-conversion-factor").value = site?.rateConversionFactor ?? 1;
   $("#site-tags").value = site?.tags?.join(", ") ?? "";
   $("#site-enabled").checked = site?.enabled ?? true;
-  $("#credential-email").value = "";
-  $("#credential-password").value = "";
-  $("#credential-access-token").value = "";
-  $("#credential-user-id").value = "";
+  clearSiteCredentialFields();
   updateCredentialFields();
   $("#site-dialog").showModal();
 }
@@ -327,12 +331,17 @@ async function saveSite(event) {
     tags: splitTags($("#site-tags").value),
     enabled: $("#site-enabled").checked
   };
-  let saved = await api(id ? `/api/sites/${id}` : "/api/sites", { method: id ? "PATCH" : "POST", body });
-  const credentialBody = pendingCredentialBody(body.authMode);
-  if (credentialBody) {
-    saved = await api(`/api/sites/${saved.id}/credentials`, { method: "PUT", body: credentialBody });
-  } else if (["public", "edge-profile"].includes(body.authMode) && state.editingSite?.credentialConfigured) {
-    saved = await api(`/api/sites/${saved.id}/credentials`, { method: "DELETE" });
+  let saved;
+  try {
+    saved = await api(id ? `/api/sites/${id}` : "/api/sites", { method: id ? "PATCH" : "POST", body });
+    const credentialBody = pendingCredentialBody(body.authMode);
+    if (credentialBody) {
+      saved = await api(`/api/sites/${saved.id}/credentials`, { method: "PUT", body: credentialBody });
+    } else if (["public", "edge-profile"].includes(body.authMode) && state.editingSite?.credentialConfigured) {
+      saved = await api(`/api/sites/${saved.id}/credentials`, { method: "DELETE" });
+    }
+  } finally {
+    clearSiteCredentialFields();
   }
   $("#site-dialog").close();
   showToast(id ? "站点已更新" : "站点已添加，请完成首次登录");
@@ -486,9 +495,16 @@ function updateCredentialFields() {
   const mode = $("#site-auth-mode").value;
   $("#sub2api-credentials").hidden = mode !== "sub2api-password";
   $("#newapi-credentials").hidden = mode !== "newapi-token";
+  $("#sub2api-token-credentials").hidden = mode !== "sub2api-token";
+  $("#capture-browser-session").hidden = !(
+    state.browserAuthSupported
+    && state.editingSite?.id
+    && $("#site-provider").value === "sub2api"
+    && mode === "edge-profile"
+  );
   $("#credential-state").textContent = state.editingSite?.credentialConfigured
     ? `已配置凭据：${state.editingSite.authUsername || "已加密保存"}`
-    : mode === "sub2api-password" || mode === "newapi-token" ? "尚未配置凭据" : "";
+    : ["sub2api-password", "sub2api-token", "newapi-token"].includes(mode) ? "尚未配置凭据" : "";
 }
 
 function pendingCredentialBody(authMode) {
@@ -506,7 +522,41 @@ function pendingCredentialBody(authMode) {
     if (!accessToken || !userId) throw new Error("Access Token 和用户 ID 必须同时填写");
     return { authMode, accessToken, userId };
   }
+  if (authMode === "sub2api-token") {
+    const accessToken = $("#credential-sub2api-access-token").value.trim();
+    const refreshToken = $("#credential-sub2api-refresh-token").value.trim();
+    if (!accessToken && !refreshToken) return null;
+    if (!accessToken) throw new Error("Access Token 不能为空");
+    return { authMode, accessToken, refreshToken };
+  }
   return null;
+}
+
+async function captureBrowserSession(event) {
+  const site = state.editingSite;
+  if (!site) throw new Error("请先保存站点再提取登录态");
+  const tokens = await withButton(event.currentTarget, () => api(`/api/sites/${site.id}/capture-browser-session`, {
+    method: "POST"
+  }));
+  $("#site-auth-mode").value = "sub2api-token";
+  $("#credential-sub2api-access-token").value = tokens.accessToken;
+  $("#credential-sub2api-refresh-token").value = tokens.refreshToken;
+  updateCredentialFields();
+  showToast("Edge 登录态已提取，请保存站点");
+}
+
+function clearSiteCredentialFields() {
+  $("#credential-email").value = "";
+  $("#credential-password").value = "";
+  $("#credential-access-token").value = "";
+  $("#credential-user-id").value = "";
+  $("#credential-sub2api-access-token").value = "";
+  $("#credential-sub2api-refresh-token").value = "";
+}
+
+function closeSiteDialog() {
+  clearSiteCredentialFields();
+  $("#site-dialog").close();
 }
 
 function defaultAuthMode(providerId) {
@@ -621,7 +671,7 @@ function authBadge(status) {
   return badge(label, kind);
 }
 function authModeLabel(mode) {
-  return { public: "公开", "sub2api-password": "账号密码", "newapi-token": "Access Token", "edge-profile": "Edge" }[mode] ?? mode;
+  return { public: "公开", "sub2api-password": "账号密码", "sub2api-token": "sub2api Token", "newapi-token": "Access Token", "edge-profile": "Edge" }[mode] ?? mode;
 }
 function changeTypeLabel(type) {
   return {

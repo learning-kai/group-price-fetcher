@@ -54,7 +54,8 @@ export async function fetchPrices(options, client = apiFetch) {
     normalizeGroupRate(group, userRates)
   ));
   const normalizedKeys = normalizeKeys(keysPayload);
-  const currentRates = deriveCurrentRates(normalizedKeys, normalizedGroups, userRates);
+  const selectedKeys = selectCurrentRateKeys(normalizedKeys);
+  const currentRates = deriveCurrentRates(selectedKeys, normalizedGroups, userRates);
 
   let overrides = [];
   if (isAdmin && includeUserOverrides) {
@@ -71,7 +72,7 @@ export async function fetchPrices(options, client = apiFetch) {
     keys: includeKeys ? normalizedKeys : null,
     currentRates,
     userOverrides: overrides,
-    summary: summarizeGroups(normalizedGroups, currentRates)
+    summary: summarizeGroups(normalizedGroups, currentRates, selectedKeys)
   };
 }
 
@@ -118,7 +119,7 @@ export function normalizeGroupRate(group, userRates = {}) {
   };
 }
 
-export function summarizeGroups(groups, currentRates = []) {
+export function summarizeGroups(groups, currentRates = [], selectedKeys = []) {
   const count = groups.length;
   const activeCount = groups.filter((group) => !group.status || group.status === "active").length;
   const rates = groups.map((group) => group.effectiveRateMultiplier).filter(Number.isFinite);
@@ -143,11 +144,18 @@ export function summarizeGroups(groups, currentRates = []) {
     avgRate,
     currentRateMultiplier: primaryCurrentRate,
     currentRateCount: currentRates.length,
+    currentRateKeyName: selectedKeys.length === 1 ? selectedKeys[0].name || null : null,
     currentMinRate: activeCurrentRates.length ? Math.min(...activeCurrentRates) : null,
     currentMaxRate: activeCurrentRates.length ? Math.max(...activeCurrentRates) : null,
     currentRateAmbiguous: uniqueCurrentRates.length > 1,
     platforms: [...new Set(groups.map((group) => group.platform).filter(Boolean))].sort()
   };
+}
+
+export function selectCurrentRateKeys(keys, preferredName = "1111") {
+  if (!Array.isArray(keys) || keys.length === 0) return keys;
+  const preferred = keys.filter((key) => key.isActive && String(key.name ?? "").trim() === preferredName);
+  return preferred.length ? preferred : keys;
 }
 
 export function deriveCurrentRates(keys, groups, userRates = {}) {
@@ -249,6 +257,7 @@ function normalizeKeys(payload) {
     groupRateMultiplier: nullableNumber(key.group?.rate_multiplier),
     userRateMultiplier: nullableNumber(key.group?.user_rate_multiplier),
     status: key.status ?? "",
+    isActive: !key.status || key.status === "active",
     quota: nullableNumber(key.quota),
     quotaUsed: nullableNumber(key.quota_used),
     usage5h: nullableNumber(key.usage_5h),

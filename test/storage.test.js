@@ -82,7 +82,7 @@ test("v4 through v6 migrations preserve legacy data and add site conversion", as
 
     const verification = new DatabaseSync(dbPath);
     try {
-      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 6);
+      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 7);
       assert.equal(
         verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'hidden_rate_groups'").get().count,
         1
@@ -148,6 +148,37 @@ test("site conversion adjusts rate reads and sorting without rewriting collected
         /倍率换算系数/
       );
     }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("collection persists the logged-in account current selected rate for each site", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({
+      name: "当前倍率站",
+      baseUrl: "https://current-rate.example.com",
+      rateConversionFactor: 0.5
+    });
+    const result = sampleCollection(0.8);
+    result.summary = {
+      ...result.summary,
+      currentRateMultiplier: 0.3,
+      currentRateAmbiguous: false,
+      currentRateCount: 1
+    };
+    fixture.repo.saveCollection(site.id, result, "2026-07-13T00:00:00.000Z");
+
+    const savedSite = fixture.repo.getSite(site.id);
+    assert.equal(savedSite.sourceCurrentRateMultiplier, 0.3);
+    assert.equal(savedSite.currentRateMultiplier, 0.15);
+    assert.equal(savedSite.currentRateAmbiguous, false);
+    assert.equal(savedSite.currentRateCount, 1);
+
+    const rate = fixture.repo.listLatestRates({ siteId: site.id }).items[0];
+    assert.equal(rate.siteCurrentRateMultiplier, 0.15);
+    assert.equal(rate.siteCurrentRateAmbiguous, false);
   } finally {
     await fixture.cleanup();
   }

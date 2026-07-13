@@ -2,6 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+test("dashboard layout contains responsive overflow guards for dense tables and forms", async () => {
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+
+  assert.match(styles, /\.workspace\s*\{[^}]*max-width:\s*100%/s);
+  assert.match(styles, /\.filter-bar[^\{]*\{[^}]*repeat\(auto-fit,\s*minmax\(/s);
+  assert.match(styles, /\.data-surface\s*\{[^}]*min-width:\s*0/s);
+  assert.match(styles, /\.table-scroll\s*\{[^}]*overscroll-behavior-inline:\s*contain/s);
+  assert.match(styles, /\.settings-block\s*\{[^}]*min-width:\s*0/s);
+  assert.match(styles, /\.inline-form[^\{]*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(styles, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.nav\s*\{[^}]*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
+});
+
 test("dashboard exposes management, filtering, sorting, pagination and history controls", async () => {
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   for (const id of [
@@ -37,6 +49,7 @@ test("dashboard exposes management, filtering, sorting, pagination and history c
     assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
   }
   assert.match(html, /type=["']password["']/i);
+  assert.match(html, /当前账号倍率/);
   for (const id of ["credential-password", "credential-access-token"]) {
     const input = html.match(new RegExp(`<input[^>]*id=["']${id}["'][^>]*>`))?.[0] ?? "";
     assert.ok(input, `missing sensitive input #${id}`);
@@ -55,6 +68,8 @@ test("dashboard script uses management APIs and explicit auth actions", async ()
   assert.match(script, /empty/i);
   assert.match(script, /error/i);
   assert.match(script, /safeHandler/);
+  assert.match(script, /siteCurrentRateMultiplier/);
+  assert.match(script, /当前账号未选择固定倍率|账号存在多个当前倍率/);
 });
 
 test("site editor supports portable sub2api tokens and Windows session capture", async () => {

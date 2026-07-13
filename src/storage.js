@@ -173,6 +173,20 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       PRAGMA user_version = 6;
       COMMIT;
     `);
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 7) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("current_rate_multiplier")) db.exec("ALTER TABLE sites ADD COLUMN current_rate_multiplier REAL");
+        if (!columns.has("current_rate_ambiguous")) db.exec("ALTER TABLE sites ADD COLUMN current_rate_ambiguous INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("current_rate_count")) db.exec("ALTER TABLE sites ADD COLUMN current_rate_count INTEGER NOT NULL DEFAULT 0");
+        db.exec("PRAGMA user_version = 7; COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
   }
 
   function createCategory(input) {
@@ -543,6 +557,16 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
           }
         }
       }
+      const currentRate = nullableFiniteNumber(result.summary?.currentRateMultiplier);
+      const currentRateAmbiguous = Boolean(result.summary?.currentRateAmbiguous);
+      const currentRateCount = Number.isInteger(Number(result.summary?.currentRateCount))
+        ? Math.max(0, Number(result.summary.currentRateCount))
+        : 0;
+      db.prepare(`
+        UPDATE sites
+        SET current_rate_multiplier = ?, current_rate_ambiguous = ?, current_rate_count = ?, updated_at = ?
+        WHERE id = ?
+      `).run(currentRate, currentRateAmbiguous ? 1 : 0, currentRateCount, iso(clock()), siteId);
       db.exec("COMMIT");
       return { insertedVersions, groupCount: result.groups.length, changeCount };
     } catch (error) {
@@ -638,7 +662,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     const total = Number(db.prepare(`SELECT COUNT(*) AS count ${base}`).get(...params).count);
     const items = db.prepare(`
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
-        s.rate_conversion_factor, c.name AS category_name,
+        s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
+        s.current_rate_count, c.name AS category_name,
         EXISTS (
           SELECT 1 FROM hidden_rate_groups h
           WHERE h.site_id = r.site_id AND h.group_id = r.group_id
@@ -651,7 +676,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
   function getRateHistory(siteId, groupId, limit = 200) {
     return db.prepare(`
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
-        s.rate_conversion_factor, c.name AS category_name
+        s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
+        s.current_rate_count, c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id
       WHERE r.site_id = ? AND r.group_id = ? ORDER BY r.valid_from DESC LIMIT ?
     `).all(siteId, String(groupId), Math.min(1000, positiveInteger(limit, "历史数量"))).map(mapRate);
@@ -702,7 +728,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     }));
     const rates = db.prepare(`
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
-        s.rate_conversion_factor, c.name AS category_name
+        s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
+        s.current_rate_count, c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id
       LEFT JOIN categories c ON c.id = s.category_id
       WHERE r.valid_to IS NULL
@@ -861,6 +888,8 @@ function mapCategory(row) {
 }
 
 function mapSite(row) {
+  const sourceCurrentRateMultiplier = nullableFiniteNumber(row.current_rate_multiplier);
+  const rateConversionFactor = Number(row.rate_conversion_factor ?? 1);
   return {
     id: Number(row.id),
     name: row.name,
@@ -869,7 +898,13 @@ function mapSite(row) {
     categoryId: row.category_id === null ? null : Number(row.category_id),
     categoryName: row.category_name ?? "",
     scheduleMinutes: row.schedule_minutes === null ? null : Number(row.schedule_minutes),
-    rateConversionFactor: Number(row.rate_conversion_factor ?? 1),
+    rateConversionFactor,
+    sourceCurrentRateMultiplier,
+    currentRateMultiplier: sourceCurrentRateMultiplier === null
+      ? null
+      : convertRate(sourceCurrentRateMultiplier, rateConversionFactor),
+    currentRateAmbiguous: Boolean(row.current_rate_ambiguous),
+    currentRateCount: Number(row.current_rate_count ?? 0),
     enabled: Boolean(row.enabled),
     authStatus: row.auth_status,
     authMode: row.auth_mode,
@@ -904,6 +939,7 @@ function mapRun(row) {
 function mapRate(row) {
   const sourceEffectiveRateMultiplier = Number(row.effective_rate_multiplier);
   const rateConversionFactor = Number(row.rate_conversion_factor ?? 1);
+  const sourceSiteCurrentRateMultiplier = nullableFiniteNumber(row.current_rate_multiplier);
   return {
     id: Number(row.id),
     siteId: Number(row.site_id),
@@ -922,6 +958,12 @@ function mapRate(row) {
     sourceEffectiveRateMultiplier,
     rateConversionFactor,
     effectiveRateMultiplier: convertRate(sourceEffectiveRateMultiplier, rateConversionFactor),
+    sourceSiteCurrentRateMultiplier,
+    siteCurrentRateMultiplier: sourceSiteCurrentRateMultiplier === null
+      ? null
+      : convertRate(sourceSiteCurrentRateMultiplier, rateConversionFactor),
+    siteCurrentRateAmbiguous: Boolean(row.current_rate_ambiguous),
+    siteCurrentRateCount: Number(row.current_rate_count ?? 0),
     peakEnabled: Boolean(row.peak_enabled),
     peakStart: row.peak_start,
     peakEnd: row.peak_end,

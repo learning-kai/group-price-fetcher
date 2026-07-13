@@ -2,6 +2,7 @@ import http from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
 import { resolveAppPaths } from "./appPaths.js";
 import { createAuthManager, createPlaywrightEdgeAdapter } from "./authManager.js";
 import { createCredentialStore } from "./credentialStore.js";
@@ -16,12 +17,21 @@ import { redactSecrets } from "./security.js";
 import { createSiteTransferService } from "./siteTransferService.js";
 import { createRepository } from "./storage.js";
 import { createTaskQueue } from "./taskQueue.js";
+import { createSelectiveProxyFetch } from "./httpClient.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 const publicDir = path.join(rootDir, "public");
 const port = Number(process.env.PORT || 5177);
 const host = process.env.HOST || "127.0.0.1";
+const nativeFetch = globalThis.fetch;
+globalThis.fetch = createSelectiveProxyFetch({
+  fetchImpl: nativeFetch,
+  proxyFetchImpl: undiciFetch,
+  proxyUrl: process.env.SELECTIVE_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "",
+  proxyHosts: process.env.SELECTIVE_PROXY_HOSTS || "",
+  proxyAgentFactory: (proxyUrl) => new ProxyAgent(proxyUrl)
+});
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],

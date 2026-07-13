@@ -43,6 +43,42 @@ export function buildApiUrl(baseUrl, path, query = {}) {
   return url;
 }
 
+export function createSelectiveProxyFetch({
+  fetchImpl = globalThis.fetch,
+  proxyFetchImpl = fetchImpl,
+  proxyUrl = "",
+  proxyHosts = "",
+  proxyAgentFactory
+} = {}) {
+  if (typeof fetchImpl !== "function") {
+    throw new ApiError("当前 Node 运行时不支持 fetch，请升级 Node 18+");
+  }
+
+  const hosts = new Set(
+    (Array.isArray(proxyHosts) ? proxyHosts : String(proxyHosts).split(","))
+      .map((host) => String(host).trim().toLowerCase())
+      .filter(Boolean)
+  );
+  const normalizedProxyUrl = String(proxyUrl).trim();
+  let dispatcher;
+
+  return async function selectiveProxyFetch(input, init = {}) {
+    const rawUrl = input instanceof URL ? input : input?.url ?? input;
+    const hostname = new URL(rawUrl).hostname.toLowerCase();
+    if (!normalizedProxyUrl || !hosts.has(hostname)) {
+      return fetchImpl(input, init);
+    }
+    if (typeof proxyAgentFactory !== "function") {
+      throw new ApiError("已配置单站代理，但缺少代理客户端");
+    }
+    if (typeof proxyFetchImpl !== "function") {
+      throw new ApiError("已配置单站代理，但缺少代理请求客户端");
+    }
+    dispatcher ??= proxyAgentFactory(normalizedProxyUrl);
+    return proxyFetchImpl(input, { ...init, dispatcher });
+  };
+}
+
 export async function apiFetch({
   baseUrl,
   path,

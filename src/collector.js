@@ -30,7 +30,7 @@ export function createCollector({
               token: auth.token,
               headers: auth.headers ?? {},
               mode: "user",
-              includeKeys: false
+              includeKeys: true
             });
             repository.saveCollection(site.id, result, result.fetchedAt ?? clock().toISOString(), runId);
             repository.finishRun(runId, {

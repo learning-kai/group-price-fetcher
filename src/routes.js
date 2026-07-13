@@ -233,6 +233,7 @@ function externalSite(site) {
     categoryName: site.categoryName,
     tags: site.tags,
     enabled: site.enabled,
+    rateConversionFactor: site.rateConversionFactor,
     authStatus: site.authStatus,
     lastCollectedAt: site.lastCollectedAt,
     updatedAt: site.updatedAt

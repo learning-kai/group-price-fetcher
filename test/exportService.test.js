@@ -21,7 +21,13 @@ test("ordinary exports contain complete public data and Excel-compatible CSV", a
   const json = await service.exportDataJson();
   assert.equal(json.contentType, "application/json; charset=utf-8");
   assert.equal(json.filename, "group-price-data-20260713-030000.json");
-  assert.equal(JSON.parse(json.body.toString("utf8")).rates.length, 2);
+  const jsonData = JSON.parse(json.body.toString("utf8"));
+  assert.equal(jsonData.rates.length, 2);
+  assert.deepEqual({
+    source: jsonData.rates[0].sourceEffectiveRateMultiplier,
+    factor: jsonData.rates[0].rateConversionFactor,
+    effective: jsonData.rates[0].effectiveRateMultiplier
+  }, { source: 0.8, factor: 0.1, effective: 0.08 });
   assert.equal(json.body.includes("plain-secret"), false);
 
   const csv = await service.exportRatesCsv();
@@ -29,6 +35,8 @@ test("ordinary exports contain complete public data and Excel-compatible CSV", a
   assert.equal(csv.filename, "group-price-rates-20260713-030000.csv");
   const csvText = csv.body.toString("utf8");
   assert.equal(csvText.startsWith("\uFEFFsite_name,site_url,category,"), true);
+  assert.match(csvText, /source_effective_rate_multiplier,rate_conversion_factor,effective_rate_multiplier/);
+  assert.match(csvText, /0\.8,0\.1,0\.08/);
   assert.equal(csvText.split("\n").length, 4);
   assert.match(csvText, /Aurora API/);
   assert.match(csvText, /Nova Relay/);
@@ -82,14 +90,14 @@ function publicSnapshot() {
     exportedAt: "",
     sites: [{ id: 1, name: "Aurora API", baseUrl: "https://aurora.example.com" }],
     rates: [
-      rate(1, "Aurora API", "https://aurora.example.com", "default", "默认组", 0.08),
-      rate(2, "Nova Relay", "https://nova.example.com", "claude", "Claude 专线", 0.12)
+      rate(1, "Aurora API", "https://aurora.example.com", "default", "默认组", 0.8, 0.1),
+      rate(2, "Nova Relay", "https://nova.example.com", "claude", "Claude 专线", 0.12, 1)
     ],
     changes: [{ id: 1, changeType: "ratio_changed" }]
   };
 }
 
-function rate(siteId, siteName, baseUrl, groupId, groupName, multiplier) {
+function rate(siteId, siteName, baseUrl, groupId, groupName, sourceMultiplier, factor) {
   return {
     siteId,
     siteName,
@@ -99,9 +107,11 @@ function rate(siteId, siteName, baseUrl, groupId, groupName, multiplier) {
     groupName,
     platform: "openai",
     status: "active",
-    baseRateMultiplier: multiplier,
+    baseRateMultiplier: sourceMultiplier,
     userRateMultiplier: null,
-    effectiveRateMultiplier: multiplier,
+    sourceEffectiveRateMultiplier: sourceMultiplier,
+    rateConversionFactor: factor,
+    effectiveRateMultiplier: Number((sourceMultiplier * factor).toPrecision(15)),
     rpmLimit: 60,
     description: "演示",
     validFrom: "2026-07-13T00:00:00.000Z"

@@ -98,6 +98,34 @@ test("management API hides and restores rate groups without filtering external d
   }
 });
 
+test("site conversion is exposed consistently by management and external APIs", async () => {
+  const fixture = await createFixture();
+  try {
+    const created = await fixture.request("POST", "/api/sites", {
+      name: "换算站",
+      baseUrl: "https://conversion.example.com",
+      rateConversionFactor: 0.1
+    });
+    fixture.repo.saveCollection(created.body.id, sampleCollection(0.8), "2026-07-13T00:00:00.000Z");
+
+    const rates = await fixture.request("GET", `/api/rates?siteId=${created.body.id}`);
+    assert.deepEqual({
+      source: rates.body.items[0].sourceEffectiveRateMultiplier,
+      factor: rates.body.items[0].rateConversionFactor,
+      effective: rates.body.items[0].effectiveRateMultiplier
+    }, { source: 0.8, factor: 0.1, effective: 0.08 });
+
+    const externalRates = await fixture.request("GET", `/api/external/v1/sites/${created.body.id}/rates`);
+    assert.equal(externalRates.body.data[0].sourceEffectiveRateMultiplier, 0.8);
+    assert.equal(externalRates.body.data[0].rateConversionFactor, 0.1);
+    assert.equal(externalRates.body.data[0].effectiveRateMultiplier, 0.08);
+    const externalSites = await fixture.request("GET", "/api/external/v1/sites");
+    assert.equal(externalSites.body.data[0].rateConversionFactor, 0.1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("hidden rate group controls reject non-loopback clients before repository access", async () => {
   const route = createApiRouter({
     repository: {

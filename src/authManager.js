@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { normalizeBaseUrl } from "./httpClient.js";
 import { findEdgeExecutable, resolveEdgeToken } from "./edgeAuth.js";
@@ -452,15 +452,65 @@ function requiredCredential(value, label) {
 
 async function acquireProfileLock(lockPath) {
   try {
-    const handle = await open(lockPath, "wx");
-    await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
-    return handle;
+    return await createProfileLock(lockPath);
   } catch (error) {
     if (error?.code !== "EEXIST") throw error;
     const details = await readFile(lockPath, "utf8").catch(() => "");
-    throw new AuthError(`专用浏览器 Profile 正被其他进程使用${details ? `：${details}` : ""}`, {
-      code: "PROFILE_LOCKED",
-      status: 409
-    });
+    const owner = parseProfileLock(details);
+    if (!owner || isProcessAlive(owner.pid)) throw profileLocked(details);
+
+    const stalePath = `${lockPath}.stale-${process.pid}-${Date.now()}`;
+    try {
+      await rename(lockPath, stalePath);
+    } catch (renameError) {
+      if (renameError?.code !== "ENOENT") throw renameError;
+    }
+    try {
+      return await createProfileLock(lockPath);
+    } catch (retryError) {
+      if (retryError?.code !== "EEXIST") throw retryError;
+      const current = await readFile(lockPath, "utf8").catch(() => "");
+      throw profileLocked(current);
+    } finally {
+      await rm(stalePath, { force: true }).catch(() => {});
+    }
   }
+}
+
+async function createProfileLock(lockPath) {
+  const handle = await open(lockPath, "wx");
+  try {
+    await handle.writeFile(JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }));
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await rm(lockPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function parseProfileLock(details) {
+  try {
+    const value = JSON.parse(details);
+    return Number.isInteger(value?.pid) && value.pid > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function profileLocked(details) {
+  return new AuthError(`专用浏览器 Profile 正被其他进程使用${details ? `：${details}` : ""}`, {
+    code: "PROFILE_LOCKED",
+    status: 409
+  });
 }

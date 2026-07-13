@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createAuthManager, AuthError, readStorageStateFromPage } from "../src/authManager.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { createAuthManager, createPlaywrightEdgeAdapter, AuthError, readStorageStateFromPage } from "../src/authManager.js";
 
 const site = { id: 7, baseUrl: "https://auth.example.com", name: "认证站" };
 
@@ -137,6 +140,27 @@ test("browser page closes only after localStorage evaluation resolves", async ()
 
   assert.deepEqual(state, { accessToken: "access", refreshToken: "refresh" });
   assert.deepEqual(events, ["evaluate:start", "evaluate:end", "close"]);
+});
+
+test("stale profile lock from a dead process is reclaimed before browser launch", async () => {
+  const profileDir = await mkdtemp(path.join(os.tmpdir(), "group-price-stale-profile-"));
+  const lockPath = path.join(profileDir, ".collector.lock");
+  await writeFile(lockPath, JSON.stringify({ pid: 2147483647, createdAt: "2026-07-12T18:26:45.260Z" }));
+  const adapter = createPlaywrightEdgeAdapter({
+    profileDir,
+    edgeExecutable: path.join(profileDir, "missing-edge.exe"),
+    navigationTimeoutMs: 100
+  });
+  try {
+    await assert.rejects(
+      () => adapter.readState(site),
+      (error) => error.code !== "PROFILE_LOCKED"
+    );
+    await assert.rejects(() => readFile(lockPath), (error) => error.code === "ENOENT");
+  } finally {
+    await adapter.close();
+    await rm(profileDir, { recursive: true, force: true });
+  }
 });
 
 test("public authentication mode does not access credentials or browser state", async () => {

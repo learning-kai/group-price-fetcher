@@ -12,7 +12,7 @@ export class RouteError extends Error {
   }
 }
 
-export function createApiRouter({ repository, collector, authManager, scheduler, exportService, apiAuth = null }) {
+export function createApiRouter({ repository, collector, authManager, scheduler, exportService, siteTransferService, apiAuth = null }) {
   const externalAuth = apiAuth ?? createExternalApiAuth({
     getHash: () => repository.getExternalApiKeyHash(),
     setHash: (hash) => repository.setExternalApiKeyHash(hash)
@@ -37,6 +37,20 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
     if (method === "POST" && pathname === "/api/exports/encrypted-backup") {
       try {
         return downloadResponse(await exportService.exportEncryptedBackup(body.password));
+      } catch (error) {
+        throw sanitizeExportError(error, body.password);
+      }
+    }
+    if (method === "POST" && pathname === "/api/transfers/sites/export") {
+      try {
+        return downloadResponse(await siteTransferService.exportTransfer(body.password));
+      } catch (error) {
+        throw sanitizeExportError(error, body.password);
+      }
+    }
+    if (method === "POST" && pathname === "/api/transfers/sites/import") {
+      try {
+        return ok(await siteTransferService.importTransfer(body.transfer, body.password));
       } catch (error) {
         throw sanitizeExportError(error, body.password);
       }
@@ -241,7 +255,12 @@ function externalSite(site) {
 }
 
 export function errorResponse(error) {
-  const status = error?.code === "BACKUP_PASSWORD_INVALID"
+  const status = [
+    "BACKUP_PASSWORD_INVALID",
+    "BACKUP_DECRYPT_FAILED",
+    "BACKUP_FORMAT_INVALID",
+    "TRANSFER_PAYLOAD_INVALID"
+  ].includes(error?.code)
     ? 400
     : error instanceof RouteError
     ? error.status

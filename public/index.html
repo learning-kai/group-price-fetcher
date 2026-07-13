@@ -141,6 +141,18 @@
               <label><span>确认密码</span><input id="backup-password-confirm" type="password" autocomplete="new-password" minlength="10" required></label>
               <button id="export-encrypted-backup" class="primary-command" type="submit">导出加密备份</button>
             </form>
+            <h3>跨平台站点交换</h3>
+            <form id="transfer-export-form" class="inline-form">
+              <label><span>导出密码</span><input id="transfer-export-password" type="password" autocomplete="new-password" minlength="10" required></label>
+              <label><span>确认密码</span><input id="transfer-export-password-confirm" type="password" autocomplete="new-password" minlength="10" required></label>
+              <button id="export-site-transfer" class="primary-command" type="submit">导出站点与凭据</button>
+            </form>
+            <form id="transfer-import-form" class="inline-form">
+              <label><span>交换文件</span><input id="transfer-import-file" type="file" accept=".gpftransfer,application/octet-stream" required></label>
+              <label><span>解密密码</span><input id="transfer-import-password" type="password" autocomplete="current-password" minlength="10" required></label>
+              <button id="import-site-transfer" class="secondary-command" type="submit">导入并覆盖</button>
+            </form>
+            <p id="transfer-import-result" class="muted" aria-live="polite"></p>
           </section>
         </section>
       </main>

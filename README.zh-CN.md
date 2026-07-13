@@ -3,11 +3,11 @@
 ![许可证](https://img.shields.io/badge/license-MIT-2ea44f)
 ![版本](https://img.shields.io/badge/version-0.1.0-0969da)
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white)
-![平台](https://img.shields.io/badge/platform-Windows-0078D4?logo=windows&logoColor=white)
+![平台](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-345f9d)
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-一个运行在 Windows 本地的分组倍率控制台，用于采集、比较并通过 API 提供 sub2api、NewAPI 及兼容网关的价格数据。
+一个可自托管在 Windows 或 Linux 的分组倍率控制台，用于采集、比较并通过 API 提供 sub2api、NewAPI 及兼容网关的价格数据。
 
 ## 为什么做
 
@@ -18,26 +18,28 @@
 - 采集 sub2api 风格接口和 NewAPI 的分组倍率。
 - 可见的 Uling19 Provider 已删除，仅保留 sub2api 和 NewAPI。SQLite v4 会自动把旧 `uling-gateway` 站点迁移为 `sub2api`，不改变 URL、站点记录或倍率历史。
 - 支持 sub2api 邮箱密码、NewAPI 公开/Token 增强采集，以及持久化 Edge Profile 兜底。
-- 使用 Windows DPAPI 加密保存账号凭据，SQLite 只保存元数据。
+- 使用 Windows DPAPI 或 Linux 服务端 AES-256-GCM Vault 加密保存账号凭据，SQLite 只保存元数据。
 - 按站点、分类、标签、平台、分组状态和认证状态筛选排序。
+- 支持每站点倍率换算系数和本地隐藏分组，不重写已采集历史。
 - 显式记录分组新增删除、倍率、说明、RPM、额度、计费和峰值规则变化。
 - 分层定时采集、并发上限控制和单站失败隔离。
 - 通过 `/api/external/v1` 为本机或局域网其他软件提供稳定只读接口。
 - 支持普通 JSON/CSV 数据导出，以及使用密码加密、可移植的 `.gpfbackup` 完整灾备。
+- 使用加密 `.gpftransfer` 在相互独立的实例间交换站点配置和账号凭据。
 
 ## 截图与演示
 
 ![分组倍率控制台](docs/assets/dashboard.png)
 
-控制台默认运行在 `http://127.0.0.1:5177`。
+控制台默认运行在 `http://127.0.0.1:5177`，也可以放在带认证的 HTTPS 反向代理后面。
 
 ## 快速开始
 
 ### 环境要求
 
-- Windows 10 或 11
+- Windows 10/11 或当前仍受支持的 Linux 发行版
 - Node.js 22.5 或更高版本
-- 使用浏览器 Profile 认证时需要 Microsoft Edge
+- Windows 使用浏览器 Profile 认证时需要 Microsoft Edge
 
 ```powershell
 npm install
@@ -53,6 +55,17 @@ npm run startup:install
 ```
 
 使用 `npm run startup:uninstall` 删除自动任务。
+
+Linux 需要把随机 32 字节十六进制 Vault Key 持久化到仅 root 可读的环境文件，并把数据目录放在仓库外：
+
+```bash
+export GROUP_PRICE_FETCHER_HOME=/var/lib/group-price-fetcher
+export GROUP_PRICE_FETCHER_VAULT_KEY="$(openssl rand -hex 32)"
+npm install
+npm start
+```
+
+每次重启必须使用同一 Vault Key；密钥丢失或更换后，已有凭据库无法解密。Linux 支持公开接口、NewAPI Token 和 sub2api 邮箱密码认证，Edge Profile 认证仍仅支持 Windows。公网部署时应让 Node 继续监听 `127.0.0.1`，并在反向代理层强制 HTTPS 和登录认证。
 
 ## 外部 API
 
@@ -79,10 +92,11 @@ GET /api/external/v1/sites/:id/groups/:groupId/history
 
 ## 导出、备份与恢复
 
-设置页提供两类用途不同的导出：
+设置页提供三类用途不同的导出：
 
 - 普通 JSON/CSV 仅包含公开站点数据、当前倍率和变化数据，不包含登录凭据或 API Key 哈希，不适合完整灾备。JSON 包含公开站点、当前倍率和变化集合；CSV 包含当前倍率记录。
 - `.gpfbackup` 是完整可移植备份，包含已执行 checkpoint 的 SQLite 数据库和已保存凭据，使用 scrypt（`N=32768`、`r=8`、`p=1`）派生密钥并以 AES-256-GCM 加密。Edge Profile 和浏览器 Cookie 不包含在内。
+- `.gpftransfer` 只包含可移植的站点配置和账号凭据。导入时按规范化 URL 匹配并覆盖目标配置，但不删除倍率历史；交换包未携带凭据时会清除目标端旧凭据；Edge 站点导入后保持禁用，等待本机重新认证。
 
 备份密码至少需要 10 个字符。密码不会被保存，丢失后无法恢复。
 
@@ -96,7 +110,7 @@ npm run backup:restore -- "C:\path\to\backup.gpfbackup"
 
 ## 工程质量
 
-项目使用 Node.js 内置测试框架和真实临时 SQLite 数据库。验收测试覆盖 60 站并发、部分失败、认证刷新、Provider 归一化、仅变化历史、API 鉴权、凭据脱敏和重启恢复。
+项目使用 Node.js 内置测试框架和真实临时 SQLite 数据库。测试覆盖 60 站并发、部分失败、认证刷新、Provider 归一化、仅变化历史、API 鉴权、凭据脱敏、跨平台固定向量、Linux Vault 加密和重启恢复。
 
 ```powershell
 npm test
@@ -109,15 +123,17 @@ npm run test:acceptance
 
 - **5177 端口被占用：**停止旧 Node 进程，或通过其他 `PORT` 值启动。
 - **Edge 登录窗口没有打开：**确认 Microsoft Edge 安装在 Windows 标准位置。
+- **Linux 提示缺少 Vault Key：**每次重启都要提供同一个 64 位十六进制 `GROUP_PRICE_FETCHER_VAULT_KEY`。
 - **站点显示 `login_required`：**重新填写凭据或手动执行登录/验证；定时任务不会主动弹出登录窗口。
 - **局域网 API 返回 401：**在设置中生成新 API Key，并作为 Bearer Token 发送。
-- **换电脑后凭据无法使用：**DPAPI 与原 Windows 用户绑定，需要在新电脑重新填写凭据。
+- **换电脑后凭据无法使用：**DPAPI 与原 Windows 用户绑定，可通过 `.gpftransfer` 迁移可移植凭据，或在新电脑重新填写。
 
 ## 项目文档
 
 - [认证、NewAPI、变化和外部 API 计划](docs/superpowers/plans/2026-07-13-auth-newapi-changes-external-api.md)
 - [加密导出设计](docs/superpowers/specs/2026-07-13-provider-cleanup-encrypted-export-design.md)
 - [加密导出实施计划](docs/superpowers/plans/2026-07-13-provider-cleanup-encrypted-export.md)
+- [跨平台站点交换格式](docs/site-transfer-format.md)
 
 ## 隐私与安全边界
 
@@ -129,10 +145,12 @@ npm run test:acceptance
 %LOCALAPPDATA%\GroupPriceFetcher\profiles
 ```
 
-- 密码和 NewAPI Token 使用 Windows DPAPI CurrentUser 范围加密。
+Linux 使用 `GROUP_PRICE_FETCHER_HOME`（例如 `/var/lib/group-price-fetcher`），并要求配置 `GROUP_PRICE_FETCHER_VAULT_KEY`。
+
+- 密码和 NewAPI Token 使用 Windows DPAPI CurrentUser 范围加密，或使用部署 Vault Key 进行 Linux AES-256-GCM 加密。
 - Access Token、Refresh Token、Cookie 和密码不会写入 SQLite、日志、普通 JSON/CSV 导出或 API 响应；已保存凭据只会进入密码加密的 `.gpfbackup`。
 - API Key 只保存 SHA-256 哈希。
-- 普通 JSON/CSV 不包含 API Key 哈希，也不是完整备份。`.gpfbackup` 可移植，但不包含 Edge Profile 和 Cookie；迁移后，使用浏览器登录态的站点需要重新认证。
+- 普通 JSON/CSV 不包含 API Key 哈希，也不是完整备份。`.gpfbackup` 用于完整迁移，`.gpftransfer` 只迁移站点配置与凭据；两者都不包含 Edge Profile 和 Cookie。
 - `.gpfbackup` 密码丢失后无法恢复。
 - 使用时应遵守各上游站点的服务条款、频率限制和访问规则。
 

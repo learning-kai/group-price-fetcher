@@ -13,6 +13,7 @@ import { getProvider } from "./providerRegistry.js";
 import { createApiRouter, errorResponse } from "./routes.js";
 import { createScheduler } from "./scheduler.js";
 import { redactSecrets } from "./security.js";
+import { createSiteTransferService } from "./siteTransferService.js";
 import { createRepository } from "./storage.js";
 import { createTaskQueue } from "./taskQueue.js";
 
@@ -35,13 +36,14 @@ export function createDefaultServices(options = {}) {
   const paths = options.paths ?? resolveAppPaths();
   const repository = createRepository({ dbPath: paths.dbPath });
   const credentialStore = createCredentialStore({ vaultPath: paths.credentialVaultPath });
-  const browserAdapter = createPlaywrightEdgeAdapter({ profileDir: paths.profileDir });
+  const browserAdapter = createBrowserAdapter({ profileDir: paths.profileDir });
   const authManager = createAuthManager({ repository, browserAdapter, credentialStore });
   const exportService = createExportService({
     repository,
     credentialStore,
     dbPath: paths.dbPath
   });
+  const siteTransferService = createSiteTransferService({ repository, credentialStore, authManager });
   const queue = createTaskQueue({
     concurrency: Number(process.env.COLLECTOR_CONCURRENCY || 5),
     timeoutMs: Number(process.env.COLLECTOR_TIMEOUT_MS || 90_000)
@@ -58,6 +60,7 @@ export function createDefaultServices(options = {}) {
     repository,
     authManager,
     exportService,
+    siteTransferService,
     queue,
     collector,
     scheduler,
@@ -67,6 +70,23 @@ export function createDefaultServices(options = {}) {
       repository.close();
     }
   };
+}
+
+export function createBrowserAdapter({ profileDir, platform = process.platform }) {
+  if (platform === "win32") return createPlaywrightEdgeAdapter({ profileDir });
+  return {
+    async readState() { throw browserAuthUnavailable(); },
+    async writeState() { throw browserAuthUnavailable(); },
+    async login() { throw browserAuthUnavailable(); },
+    async close() {}
+  };
+}
+
+function browserAuthUnavailable() {
+  return Object.assign(new Error("浏览器登录和 Edge Profile 导入仅支持 Windows；Linux 请使用公开模式、NewAPI Token 或 sub2api 邮箱密码认证"), {
+    code: "BROWSER_AUTH_UNAVAILABLE",
+    status: 501
+  });
 }
 
 export function createServer(services = createDefaultServices()) {

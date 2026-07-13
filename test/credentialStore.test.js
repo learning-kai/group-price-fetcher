@@ -3,7 +3,32 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createCredentialStore } from "../src/credentialStore.js";
+import {
+  createCredentialStore,
+  createLinuxAesGcmProtector,
+  createPlatformProtector
+} from "../src/credentialStore.js";
+
+test("Linux AES-GCM protector round-trips without plaintext and rejects a wrong key", async () => {
+  const key = "11".repeat(32);
+  const protector = createLinuxAesGcmProtector({ key });
+  const encrypted = await protector.protect('{"password":"server-secret"}');
+
+  assert.match(encrypted, /^linux-aes-256-gcm:v1:/);
+  assert.equal(encrypted.includes("server-secret"), false);
+  assert.equal(await protector.unprotect(encrypted), '{"password":"server-secret"}');
+  await assert.rejects(
+    () => createLinuxAesGcmProtector({ key: "22".repeat(32) }).unprotect(encrypted),
+    /密钥不匹配|已损坏/
+  );
+  assert.throws(() => createLinuxAesGcmProtector({ key: "short" }), /32 字节/);
+});
+
+test("platform protector selects the portable server vault on Linux", async () => {
+  const protector = createPlatformProtector({ platform: "linux", key: "33".repeat(32) });
+  const encrypted = await protector.protect("portable");
+  assert.equal(await protector.unprotect(encrypted), "portable");
+});
 
 test("credential store encrypts values at rest and supports its full lifecycle", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-credentials-"));

@@ -6,8 +6,17 @@ import os from "node:os";
 import path from "node:path";
 import { createExportService } from "../src/exportService.js";
 import { createApiRouter } from "../src/routes.js";
-import { createServer } from "../src/server.js";
+import { createBrowserAdapter, createServer } from "../src/server.js";
 import { createRepository } from "../src/storage.js";
+
+test("Linux browser adapter reports that Edge profile authentication is unavailable", async () => {
+  const adapter = createBrowserAdapter({ profileDir: "/unused", platform: "linux" });
+  await assert.rejects(
+    () => adapter.readState(),
+    (error) => error.code === "BROWSER_AUTH_UNAVAILABLE" && error.status === 501
+  );
+  await adapter.close();
+});
 
 test("management API supports category, site, tag, schedule and pagination workflows", async () => {
   const fixture = await createFixture();
@@ -335,6 +344,45 @@ test("local export endpoints download JSON, CSV and encrypted backup artifacts",
   }
 });
 
+test("local site transfer endpoints export an artifact and import its encrypted text", async () => {
+  const calls = [];
+  const fixture = await createFixture({
+    siteTransferService: {
+      async exportTransfer(password) {
+        calls.push(["export", password]);
+        return artifact("sites.gpftransfer", "application/octet-stream", "encrypted-sites");
+      },
+      async importTransfer(transfer, password) {
+        calls.push(["import", transfer, password]);
+        return { created: 2, overwritten: 1, needsCredentials: 1, failed: 0, errors: [] };
+      }
+    }
+  });
+  try {
+    const exported = await fetch(`${fixture.baseUrl}/api/transfers/sites/export`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "site-transfer-password" })
+    });
+    assert.equal(exported.status, 200);
+    assert.equal(exported.headers.get("content-disposition"), 'attachment; filename="sites.gpftransfer"');
+    assert.equal(await exported.text(), "encrypted-sites");
+
+    const imported = await fixture.request("POST", "/api/transfers/sites/import", {
+      password: "site-transfer-password",
+      transfer: "encrypted-sites"
+    });
+    assert.equal(imported.status, 200);
+    assert.deepEqual(imported.body, { created: 2, overwritten: 1, needsCredentials: 1, failed: 0, errors: [] });
+    assert.deepEqual(calls, [
+      ["export", "site-transfer-password"],
+      ["import", "encrypted-sites", "site-transfer-password"]
+    ]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("export router returns exactly four business download headers", async () => {
   const route = createApiRouter({
     repository: {
@@ -476,6 +524,10 @@ async function createFixture(overrides = {}) {
       async exportDataJson() { throw new Error("not configured"); },
       async exportRatesCsv() { throw new Error("not configured"); },
       async exportEncryptedBackup() { throw new Error("not configured"); }
+    },
+    siteTransferService: overrides.siteTransferService ?? {
+      async exportTransfer() { throw new Error("not configured"); },
+      async importTransfer() { throw new Error("not configured"); }
     },
     close() {}
   };

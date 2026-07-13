@@ -126,3 +126,33 @@ test("dashboard script downloads exports and clears encrypted backup passwords",
   assert.match(script, /body:\s*\{\s*password\s*\}/);
   assert.match(script, /finally\s*\{[\s\S]*?#backup-password[\s\S]*?\.value\s*=\s*["']["'][\s\S]*?#backup-password-confirm[\s\S]*?\.value\s*=\s*["']["']/);
 });
+
+test("settings exposes encrypted site transfer import and export controls", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const id of [
+    "transfer-export-form",
+    "transfer-export-password",
+    "transfer-export-password-confirm",
+    "export-site-transfer",
+    "transfer-import-form",
+    "transfer-import-file",
+    "transfer-import-password",
+    "import-site-transfer",
+    "transfer-import-result"
+  ]) {
+    assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+  }
+  for (const id of ["transfer-export-password", "transfer-export-password-confirm", "transfer-import-password"]) {
+    const input = html.match(new RegExp(`<input[^>]*id=["']${id}["'][^>]*>`))?.[0] ?? "";
+    assert.match(input, /\stype=["']password["']/i);
+    assert.doesNotMatch(input, /\svalue=/i);
+  }
+  assert.ok(script.includes("/api/transfers/sites/export"));
+  assert.ok(script.includes("/api/transfers/sites/import"));
+  assert.match(script, /\.gpftransfer/);
+  assert.match(script, /\.text\(\)/);
+  assert.match(script, /needsCredentials/);
+  assert.match(script, /finally\s*\{[\s\S]*?#transfer-export-password[\s\S]*?\.value\s*=\s*["']["']/);
+  assert.match(script, /finally\s*\{[\s\S]*?#transfer-import-password[\s\S]*?\.value\s*=\s*["']["']/);
+});

@@ -300,6 +300,15 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     return row ? mapSite(row) : null;
   }
 
+  function getSiteByBaseUrl(baseUrl) {
+    const row = db.prepare(siteSelect("WHERE s.base_url = ?")).get(normalizeBaseUrl(baseUrl));
+    return row ? mapSite(row) : null;
+  }
+
+  function exportTransferSites() {
+    return db.prepare(`${siteSelect()} ORDER BY s.name COLLATE NOCASE, s.id ASC`).all().map(mapSite);
+  }
+
   function listSites(options = {}) {
     const page = positiveInteger(options.page ?? 1, "页码");
     const pageSize = Math.min(200, positiveInteger(options.pageSize ?? 50, "每页数量"));
@@ -729,6 +738,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     createSite,
     updateSite,
     getSite,
+    getSiteByBaseUrl,
+    exportTransferSites,
     listSites,
     deleteSite,
     setGlobalSchedule,

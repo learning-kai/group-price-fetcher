@@ -47,6 +47,8 @@ function bindEvents() {
   $("#export-json").addEventListener("click", safeHandler(exportJson));
   $("#export-csv").addEventListener("click", safeHandler(exportCsv));
   $("#backup-form").addEventListener("submit", safeHandler(exportEncryptedBackup));
+  $("#transfer-export-form").addEventListener("submit", safeHandler(exportSiteTransfer));
+  $("#transfer-import-form").addEventListener("submit", safeHandler(importSiteTransfer));
   $("#site-provider").addEventListener("change", handleProviderChange);
   $("#site-auth-mode").addEventListener("change", updateCredentialFields);
   $("#sites-body").addEventListener("click", safeHandler(handleSiteAction));
@@ -400,6 +402,47 @@ async function exportEncryptedBackup(event) {
   } finally {
     $("#backup-password").value = "";
     $("#backup-password-confirm").value = "";
+  }
+}
+
+async function exportSiteTransfer(event) {
+  event.preventDefault();
+  const password = $("#transfer-export-password").value;
+  const confirmation = $("#transfer-export-password-confirm").value;
+  try {
+    if (password.length < 10) throw new Error("交换文件密码至少 10 个字符");
+    if (password !== confirmation) throw new Error("两次输入的交换文件密码不一致");
+    await withButton($("#export-site-transfer"), () => downloadArtifact("/api/transfers/sites/export", {
+      method: "POST",
+      body: { password }
+    }));
+    showToast("站点配置与账号凭据已加密导出");
+  } finally {
+    $("#transfer-export-password").value = "";
+    $("#transfer-export-password-confirm").value = "";
+  }
+}
+
+async function importSiteTransfer(event) {
+  event.preventDefault();
+  const fileInput = $("#transfer-import-file");
+  const file = fileInput.files[0];
+  const password = $("#transfer-import-password").value;
+  try {
+    if (!file) throw new Error("请选择 .gpftransfer 交换文件");
+    if (!file.name.toLowerCase().endsWith(".gpftransfer")) throw new Error("文件扩展名必须是 .gpftransfer");
+    if (password.length < 10) throw new Error("交换文件密码至少 10 个字符");
+    const result = await withButton($("#import-site-transfer"), async () => api("/api/transfers/sites/import", {
+      method: "POST",
+      body: { password, transfer: await file.text() }
+    }));
+    $("#transfer-import-result").textContent = `新增 ${result.created}，覆盖 ${result.overwritten}，需补凭据 ${result.needsCredentials}，失败 ${result.failed}`;
+    await loadReferenceData();
+    if (state.view === "sites") await loadSites();
+    showToast("站点交换文件已导入");
+  } finally {
+    $("#transfer-import-password").value = "";
+    fileInput.value = "";
   }
 }
 

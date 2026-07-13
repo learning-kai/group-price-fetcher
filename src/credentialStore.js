@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export function createCredentialStore({ vaultPath, protector = createDpapiProtector() }) {
+export function createCredentialStore({ vaultPath, protector = createPlatformProtector() }) {
   if (!vaultPath) throw new Error("凭据库路径不能为空");
   if (!protector?.protect || !protector?.unprotect) throw new Error("凭据保护器无效");
   const mutex = createMutex();
@@ -77,6 +78,50 @@ export function createCredentialStore({ vaultPath, protector = createDpapiProtec
   }
 
   return { get, has, set, delete: remove, exportAll, replaceAll };
+}
+
+export function createPlatformProtector({
+  platform = process.platform,
+  key = process.env.GROUP_PRICE_FETCHER_VAULT_KEY
+} = {}) {
+  return platform === "win32"
+    ? createDpapiProtector()
+    : createLinuxAesGcmProtector({ key });
+}
+
+export function createLinuxAesGcmProtector({ key = process.env.GROUP_PRICE_FETCHER_VAULT_KEY } = {}) {
+  if (!/^[a-f0-9]{64}$/i.test(String(key ?? ""))) {
+    throw new Error("缺少有效的 GROUP_PRICE_FETCHER_VAULT_KEY（需要 32 字节十六进制密钥）");
+  }
+  const encryptionKey = Buffer.from(key, "hex");
+  return {
+    async protect(plainText) {
+      const iv = randomBytes(12);
+      const cipher = createCipheriv("aes-256-gcm", encryptionKey, iv);
+      const ciphertext = Buffer.concat([cipher.update(String(plainText), "utf8"), cipher.final()]);
+      const tag = cipher.getAuthTag();
+      return `linux-aes-256-gcm:v1:${iv.toString("base64url")}:${tag.toString("base64url")}:${ciphertext.toString("base64url")}`;
+    },
+    async unprotect(cipherText) {
+      const [prefix, version, encodedIv, encodedTag, encodedCiphertext, extra] = String(cipherText).split(":");
+      if (prefix !== "linux-aes-256-gcm" || version !== "v1" || !encodedIv || !encodedTag || !encodedCiphertext || extra !== undefined) {
+        throw new Error("Linux 凭据库格式无效");
+      }
+      try {
+        const iv = Buffer.from(encodedIv, "base64url");
+        const tag = Buffer.from(encodedTag, "base64url");
+        if (iv.length !== 12 || tag.length !== 16) throw new Error("invalid envelope");
+        const decipher = createDecipheriv("aes-256-gcm", encryptionKey, iv);
+        decipher.setAuthTag(tag);
+        return Buffer.concat([
+          decipher.update(Buffer.from(encodedCiphertext, "base64url")),
+          decipher.final()
+        ]).toString("utf8");
+      } catch {
+        throw new Error("无法解密 Linux 凭据库（密钥不匹配或文件已损坏）");
+      }
+    }
+  };
 }
 
 export function createDpapiProtector({ run = runPowerShell } = {}) {

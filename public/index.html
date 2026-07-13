@@ -157,6 +157,7 @@
           <label><span>认证方式</span><select id="site-auth-mode" required><option value="edge-profile">Edge 登录态</option><option value="sub2api-password">sub2api 账号密码</option><option value="public">公开接口</option><option value="newapi-token">NewAPI Access Token</option></select></label>
           <label><span>分类</span><select id="site-category"><option value="">未分类</option></select></label>
           <label><span>采集频率（分钟）</span><input id="site-schedule" type="number" min="1" placeholder="继承分类"></label>
+          <label><span>倍率换算系数</span><input id="site-rate-conversion-factor" type="number" min="0.000001" step="any" value="1" required></label>
         </div>
         <div id="sub2api-credentials" class="form-grid credential-fields" hidden>
           <label><span>登录邮箱</span><input id="credential-email" type="email" autocomplete="username"></label>

@@ -300,6 +300,7 @@ function openSiteDialog(site = null) {
   $("#site-auth-mode").value = site?.authMode ?? defaultAuthMode($("#site-provider").value);
   $("#site-category").value = site?.categoryId ?? "";
   $("#site-schedule").value = site?.scheduleMinutes ?? "";
+  $("#site-rate-conversion-factor").value = site?.rateConversionFactor ?? 1;
   $("#site-tags").value = site?.tags?.join(", ") ?? "";
   $("#site-enabled").checked = site?.enabled ?? true;
   $("#credential-email").value = "";
@@ -320,6 +321,7 @@ async function saveSite(event) {
     authMode: $("#site-auth-mode").value,
     categoryId: $("#site-category").value || null,
     scheduleMinutes: $("#site-schedule").value || null,
+    rateConversionFactor: Number($("#site-rate-conversion-factor").value),
     tags: splitTags($("#site-tags").value),
     enabled: $("#site-enabled").checked
   };

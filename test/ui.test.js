@@ -26,6 +26,7 @@ test("dashboard exposes management, filtering, sorting, pagination and history c
     "changes-body",
     "site-provider",
     "site-auth-mode",
+    "site-rate-conversion-factor",
     "credential-email",
     "credential-password",
     "credential-access-token",
@@ -71,6 +72,19 @@ test("latest rates can switch hidden groups and persist hide or restore actions"
   assert.match(script, /hide:\s*["']PUT["']/);
   assert.match(script, /restore:\s*["']DELETE["']/);
   assert.match(script, /state\.rates\.page\s*=\s*1[\s\S]*?await loadRates\(\)/);
+});
+
+test("site form edits a positive rate conversion factor", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const input = html.match(/<input[^>]*id=["']site-rate-conversion-factor["'][^>]*>/)?.[0] ?? "";
+
+  assert.match(input, /type=["']number["']/);
+  assert.match(input, /min=["']0\.000001["']/);
+  assert.match(input, /step=["']any["']/);
+  assert.match(input, /value=["']1["']/);
+  assert.match(script, /#site-rate-conversion-factor["']\)\.value\s*=\s*site\?\.rateConversionFactor\s*\?\?\s*1/);
+  assert.match(script, /rateConversionFactor:\s*Number\(\$\(["']#site-rate-conversion-factor["']\)\.value\)/);
 });
 
 test("settings exposes ordinary exports and password-safe encrypted backup controls", async () => {

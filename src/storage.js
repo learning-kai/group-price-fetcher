@@ -14,7 +14,7 @@ const SITE_SORTS = new Map([
   ["authStatus", "s.auth_status"]
 ]);
 const RATE_SORTS = new Map([
-  ["rate", "r.effective_rate_multiplier"],
+  ["rate", "r.effective_rate_multiplier * s.rate_conversion_factor"],
   ["site", "s.name"],
   ["group", "r.group_name"],
   ["platform", "r.platform"],
@@ -166,6 +166,13 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       PRAGMA user_version = 5;
       COMMIT;
     `);
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 6) db.exec(`
+      BEGIN;
+      ALTER TABLE sites ADD COLUMN rate_conversion_factor REAL NOT NULL DEFAULT 1 CHECK(rate_conversion_factor > 0);
+      PRAGMA user_version = 6;
+      COMMIT;
+    `);
   }
 
   function createCategory(input) {
@@ -224,8 +231,10 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     try {
       db.exec("BEGIN IMMEDIATE");
       const result = db.prepare(`
-        INSERT INTO sites(name, base_url, provider_id, category_id, schedule_minutes, enabled, auth_mode, next_run_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sites(
+          name, base_url, provider_id, category_id, schedule_minutes, enabled,
+          auth_mode, rate_conversion_factor, next_run_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         record.name,
         record.baseUrl,
@@ -234,6 +243,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         record.scheduleMinutes,
         record.enabled ? 1 : 0,
         record.authMode,
+        record.rateConversionFactor,
         now,
         now,
         now
@@ -259,7 +269,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       db.exec("BEGIN IMMEDIATE");
       db.prepare(`
         UPDATE sites SET name = ?, base_url = ?, provider_id = ?, category_id = ?,
-          schedule_minutes = ?, enabled = ?, auth_mode = ?, updated_at = ? WHERE id = ?
+          schedule_minutes = ?, enabled = ?, auth_mode = ?, rate_conversion_factor = ?,
+          updated_at = ? WHERE id = ?
       `).run(
         merged.name,
         merged.baseUrl,
@@ -268,6 +279,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         merged.scheduleMinutes,
         merged.enabled ? 1 : 0,
         merged.authMode,
+        merged.rateConversionFactor,
         iso(clock()),
         id
       );
@@ -616,7 +628,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     const base = `FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id ${clause}`;
     const total = Number(db.prepare(`SELECT COUNT(*) AS count ${base}`).get(...params).count);
     const items = db.prepare(`
-      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name,
+      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
+        s.rate_conversion_factor, c.name AS category_name,
         EXISTS (
           SELECT 1 FROM hidden_rate_groups h
           WHERE h.site_id = r.site_id AND h.group_id = r.group_id
@@ -628,7 +641,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
 
   function getRateHistory(siteId, groupId, limit = 200) {
     return db.prepare(`
-      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name
+      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
+        s.rate_conversion_factor, c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id
       WHERE r.site_id = ? AND r.group_id = ? ORDER BY r.valid_from DESC LIMIT ?
     `).all(siteId, String(groupId), Math.min(1000, positiveInteger(limit, "历史数量"))).map(mapRate);
@@ -672,12 +686,14 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       categoryName: site.categoryName,
       tags: site.tags,
       enabled: site.enabled,
+      rateConversionFactor: site.rateConversionFactor,
       authStatus: site.authStatus,
       lastCollectedAt: site.lastCollectedAt,
       updatedAt: site.updatedAt
     }));
     const rates = db.prepare(`
-      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status, c.name AS category_name
+      SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
+        s.rate_conversion_factor, c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id
       LEFT JOIN categories c ON c.id = s.category_id
       WHERE r.valid_to IS NULL
@@ -789,7 +805,8 @@ function normalizeSiteInput(input) {
       : Number(input.categoryId),
     scheduleMinutes: optionalPositiveInteger(input.scheduleMinutes, "采集频率"),
     enabled: input.enabled !== false,
-    authMode: normalizeAuthMode(input.authMode ?? (providerId === "newapi" ? "public" : "edge-profile"))
+    authMode: normalizeAuthMode(input.authMode ?? (providerId === "newapi" ? "public" : "edge-profile")),
+    rateConversionFactor: positiveFiniteNumber(input.rateConversionFactor ?? 1, "倍率换算系数")
   };
 }
 
@@ -841,6 +858,7 @@ function mapSite(row) {
     categoryId: row.category_id === null ? null : Number(row.category_id),
     categoryName: row.category_name ?? "",
     scheduleMinutes: row.schedule_minutes === null ? null : Number(row.schedule_minutes),
+    rateConversionFactor: Number(row.rate_conversion_factor ?? 1),
     enabled: Boolean(row.enabled),
     authStatus: row.auth_status,
     authMode: row.auth_mode,
@@ -873,6 +891,8 @@ function mapRun(row) {
 }
 
 function mapRate(row) {
+  const sourceEffectiveRateMultiplier = Number(row.effective_rate_multiplier);
+  const rateConversionFactor = Number(row.rate_conversion_factor ?? 1);
   return {
     id: Number(row.id),
     siteId: Number(row.site_id),
@@ -888,7 +908,9 @@ function mapRate(row) {
     billingType: row.billing_type,
     baseRateMultiplier: row.base_rate_multiplier,
     userRateMultiplier: row.user_rate_multiplier,
-    effectiveRateMultiplier: row.effective_rate_multiplier,
+    sourceEffectiveRateMultiplier,
+    rateConversionFactor,
+    effectiveRateMultiplier: convertRate(sourceEffectiveRateMultiplier, rateConversionFactor),
     peakEnabled: Boolean(row.peak_enabled),
     peakStart: row.peak_start,
     peakEnd: row.peak_end,
@@ -1079,6 +1101,16 @@ function finiteNumber(value, label) {
   const number = Number(value);
   if (!Number.isFinite(number)) throw new Error(`${label}必须是有限数字`);
   return number;
+}
+
+function positiveFiniteNumber(value, label) {
+  const number = finiteNumber(value, label);
+  if (number <= 0) throw new Error(`${label}必须大于 0`);
+  return number;
+}
+
+function convertRate(value, factor) {
+  return Number((value * factor).toPrecision(15));
 }
 
 function nullableFiniteNumber(value) {

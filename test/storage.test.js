@@ -48,7 +48,7 @@ test("repository migrations are idempotent and site configuration round-trips", 
   }
 });
 
-test("v4 and v5 migrations map legacy providers and create hidden preferences", async () => {
+test("v4 through v6 migrations preserve legacy data and add site conversion", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-v4-migration-"));
   const dbPath = path.join(dir, "prices.db");
   let repo = createRepository({ dbPath });
@@ -65,6 +65,9 @@ test("v4 and v5 migrations map legacy providers and create hidden preferences", 
 
     const raw = new DatabaseSync(dbPath);
     raw.prepare("UPDATE sites SET provider_id = 'uling-gateway' WHERE id = ?").run(site.id);
+    if (raw.prepare("PRAGMA table_info(sites)").all().some((column) => column.name === "rate_conversion_factor")) {
+      raw.exec("ALTER TABLE sites DROP COLUMN rate_conversion_factor");
+    }
     raw.exec("DROP TABLE hidden_rate_groups; PRAGMA user_version = 3");
     raw.close();
 
@@ -79,17 +82,74 @@ test("v4 and v5 migrations map legacy providers and create hidden preferences", 
 
     const verification = new DatabaseSync(dbPath);
     try {
-      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 5);
+      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 6);
       assert.equal(
         verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'hidden_rate_groups'").get().count,
         1
       );
+      const conversion = verification.prepare("SELECT rate_conversion_factor FROM sites WHERE id = ?").get(site.id);
+      assert.equal(conversion.rate_conversion_factor, 1);
     } finally {
       verification.close();
     }
   } finally {
     repo?.close();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("site conversion adjusts rate reads and sorting without rewriting collected history", async () => {
+  const fixture = await createFixture();
+  try {
+    const convertedSite = fixture.repo.createSite({
+      name: "十倍余额站",
+      baseUrl: "https://converted.example.com",
+      rateConversionFactor: 0.1
+    });
+    const regularSite = fixture.repo.createSite({
+      name: "普通站",
+      baseUrl: "https://regular.example.com"
+    });
+    fixture.repo.saveCollection(convertedSite.id, sampleCollection(0.8), "2026-07-13T00:00:00.000Z");
+    fixture.repo.saveCollection(regularSite.id, sampleCollection(0.2), "2026-07-13T00:00:00.000Z");
+
+    assert.equal(fixture.repo.getSite(convertedSite.id).rateConversionFactor, 0.1);
+    assert.equal(fixture.repo.getSite(regularSite.id).rateConversionFactor, 1);
+    const rates = fixture.repo.listLatestRates({ sortBy: "rate", sortDir: "asc" }).items;
+    assert.deepEqual(rates.map((rate) => rate.siteId), [convertedSite.id, regularSite.id]);
+    assert.deepEqual({
+      source: rates[0].sourceEffectiveRateMultiplier,
+      factor: rates[0].rateConversionFactor,
+      effective: rates[0].effectiveRateMultiplier
+    }, { source: 0.8, factor: 0.1, effective: 0.08 });
+    assert.equal(fixture.repo.getRateHistory(convertedSite.id, "group-1")[0].effectiveRateMultiplier, 0.08);
+
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    assert.equal(raw.prepare("SELECT effective_rate_multiplier FROM rate_versions WHERE site_id = ?").get(convertedSite.id).effective_rate_multiplier, 0.8);
+    raw.close();
+    assert.equal(fixture.repo.listChanges({ siteId: convertedSite.id }).total, 0);
+
+    fixture.repo.updateSite(convertedSite.id, { rateConversionFactor: 0.25 });
+    const updated = fixture.repo.listLatestRates({ siteId: convertedSite.id }).items[0];
+    assert.equal(updated.sourceEffectiveRateMultiplier, 0.8);
+    assert.equal(updated.effectiveRateMultiplier, 0.2);
+    assert.equal(fixture.repo.listChanges({ siteId: convertedSite.id }).total, 0);
+
+    const exported = fixture.repo.exportPublicData("2026-07-13T03:00:00.000Z");
+    assert.equal(exported.sites.find((site) => site.id === convertedSite.id).rateConversionFactor, 0.25);
+    const exportedRate = exported.rates.find((rate) => rate.siteId === convertedSite.id);
+    assert.equal(exportedRate.sourceEffectiveRateMultiplier, 0.8);
+    assert.equal(exportedRate.rateConversionFactor, 0.25);
+    assert.equal(exportedRate.effectiveRateMultiplier, 0.2);
+
+    for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => fixture.repo.updateSite(convertedSite.id, { rateConversionFactor: value }),
+        /倍率换算系数/
+      );
+    }
+  } finally {
+    await fixture.cleanup();
   }
 });
 

@@ -56,6 +56,8 @@ export async function fetchPrices(options, client = apiFetch) {
   const normalizedKeys = normalizeKeys(keysPayload);
   const selectedKeys = selectCurrentRateKeys(normalizedKeys);
   const currentRates = deriveCurrentRates(selectedKeys, normalizedGroups, userRates);
+  const fetchedAt = new Date().toISOString();
+  const account = await collectSub2ApiAccount({ baseUrl, token, fetchedAt, client });
 
   let overrides = [];
   if (isAdmin && includeUserOverrides) {
@@ -67,10 +69,11 @@ export async function fetchPrices(options, client = apiFetch) {
     providerLabel: ulingGatewayProvider.label,
     baseUrl,
     mode,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt,
     groups: normalizedGroups,
     keys: includeKeys ? normalizedKeys : null,
     currentRates,
+    account,
     userOverrides: overrides,
     summary: summarizeGroups(normalizedGroups, currentRates, selectedKeys)
   };
@@ -134,6 +137,9 @@ export function summarizeGroups(groups, currentRates = [], selectedKeys = []) {
   const avgRate = rates.length
     ? roundNumber(rates.reduce((sum, rate) => sum + rate, 0) / rates.length)
     : null;
+  const currentRatesByFamily = summarizeCurrentRatesByFamily(groups, currentRates, selectedKeys);
+  const gptIdentity = currentRatesByFamily.gpt;
+  const legacyCurrentRate = gptIdentity.currentRateMultiplier ?? primaryCurrentRate;
 
   return {
     count,
@@ -142,19 +148,78 @@ export function summarizeGroups(groups, currentRates = [], selectedKeys = []) {
     minRate,
     maxRate,
     avgRate,
-    currentRateMultiplier: primaryCurrentRate,
-    currentRateCount: currentRates.length,
-    currentRateKeyName: selectedKeys.length === 1 ? selectedKeys[0].name || null : null,
+    currentRateMultiplier: legacyCurrentRate,
+    currentRateCount: gptIdentity.currentRateCount || currentRates.length,
+    currentRateKeyName: gptIdentity.currentRateKeyName
+      ?? (selectedKeys.length === 1 ? selectedKeys[0].name || null : null),
     currentMinRate: activeCurrentRates.length ? Math.min(...activeCurrentRates) : null,
     currentMaxRate: activeCurrentRates.length ? Math.max(...activeCurrentRates) : null,
-    currentRateAmbiguous: uniqueCurrentRates.length > 1,
+    currentRateAmbiguous: gptIdentity.currentRateAmbiguous || uniqueCurrentRates.length > 1,
+    currentRatesByFamily,
     platforms: [...new Set(groups.map((group) => group.platform).filter(Boolean))].sort()
   };
 }
 
-export function selectCurrentRateKeys(keys, preferredName = "1111") {
+export function summarizeCurrentRatesByFamily(groups = [], currentRates = [], selectedKeys = []) {
+  const activeRates = currentRates.filter((rate) => rate.isActive !== false);
+
+  const gptIdentityRates = selectIdentityRates(activeRates, selectedKeys, "1111");
+  const grokIdentityRates = selectIdentityRates(activeRates, selectedKeys, "grok");
+
+  return {
+    gpt: summarizeIdentityRates(gptIdentityRates, {
+      keyName: gptIdentityRates.length ? "1111" : null
+    }),
+    grok: summarizeIdentityRates(grokIdentityRates, {
+      keyName: grokIdentityRates.length ? "grok" : null,
+      groupName: grokIdentityRates.length === 1
+        ? (grokIdentityRates[0].groupName || null)
+        : null
+    })
+  };
+}
+
+function selectIdentityRates(activeRates, selectedKeys, preferredName) {
+  const exact = activeRates.filter((rate) => String(rate.keyName ?? "").trim() === preferredName);
+  if (exact.length) return exact;
+
+  const preferredSelected = selectedKeys.filter((key) => String(key?.name ?? "").trim() === preferredName);
+  if (!preferredSelected.length) return [];
+
+  const preferredIds = new Set(preferredSelected.map((key) => String(key.id)));
+  const byId = activeRates.filter((rate) => preferredIds.has(String(rate.keyId)));
+  return byId.length ? byId : [];
+}
+
+function summarizeIdentityRates(rateRows, meta = {}) {
+  const values = rateRows
+    .map((rate) => Number(rate.currentRateMultiplier))
+    .filter(Number.isFinite);
+  return summarizeNumericIdentity(values, {
+    keyName: meta.keyName ?? null,
+    groupName: meta.groupName ?? null
+  });
+}
+
+function summarizeNumericIdentity(values, meta = {}) {
+  const unique = [...new Set(values)];
+  return {
+    currentRateMultiplier: unique.length === 1 ? unique[0] : null,
+    currentRateAmbiguous: unique.length > 1,
+    currentRateCount: values.length,
+    currentRateKeyName: meta.keyName ?? null,
+    currentRateGroupName: meta.groupName ?? null
+  };
+}
+
+export function selectCurrentRateKeys(keys, preferredNames = ["1111", "grok"]) {
   if (!Array.isArray(keys) || keys.length === 0) return keys;
-  const preferred = keys.filter((key) => key.isActive && String(key.name ?? "").trim() === preferredName);
+  const names = new Set(
+    (Array.isArray(preferredNames) ? preferredNames : [preferredNames])
+      .map((name) => String(name ?? "").trim())
+      .filter(Boolean)
+  );
+  const preferred = keys.filter((key) => key.isActive && names.has(String(key.name ?? "").trim()));
   return preferred.length ? preferred : keys;
 }
 
@@ -226,6 +291,24 @@ async function collectAdminOverrides({ baseUrl, token, groups, client }) {
   }
 
   return overrides;
+}
+
+async function collectSub2ApiAccount({ baseUrl, token, fetchedAt, client }) {
+  if (!token) return { status: "unknown", balanceUsd: null, source: "sub2api:auth/me", error: "", fetchedAt };
+  try {
+    const payload = await client({ baseUrl, token, path: "/auth/me" });
+    const balanceUsd = nullableNumber(payload?.balance);
+    if (balanceUsd === null) throw new Error("余额字段缺失");
+    return { status: "known", balanceUsd, source: "sub2api:auth/me", error: "", fetchedAt };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      balanceUsd: null,
+      source: "sub2api:auth/me",
+      error: String(error?.message || "余额接口不可用").slice(0, 200),
+      fetchedAt
+    };
+  }
 }
 
 async function safeClient(client, request, fallback) {

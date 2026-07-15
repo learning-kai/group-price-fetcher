@@ -108,3 +108,27 @@ test("credential store exports defensive copies and replaces the complete vault"
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("credential store accepts positive notification references while preserving string-only values", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-credentials-"));
+  const vaultPath = path.join(dir, "credentials.vault");
+  const protector = {
+    async protect(value) { return Buffer.from(value).toString("base64"); },
+    async unprotect(value) { return Buffer.from(value, "base64").toString("utf8"); }
+  };
+  const store = createCredentialStore({ vaultPath, protector });
+
+  try {
+    await store.set("notification:2", { config: JSON.stringify({ token: "secret" }) });
+    assert.deepEqual(await store.get("notification:2"), { config: '{"token":"secret"}' });
+    await assert.rejects(() => store.set("notification:0", { config: "{}" }), /凭据引用无效/);
+    await assert.rejects(() => store.set("notification:1", { config: {} }), /字符串/);
+    await store.replaceAll({
+      "site:1": { accessToken: "old-compatible-token", userId: "1" },
+      "notification:3": { config: "{}" }
+    });
+    assert.equal((await store.exportAll())["site:1"].accessToken, "old-compatible-token");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

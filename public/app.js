@@ -4,16 +4,23 @@ const state = {
   tags: [],
   providers: [],
   rates: { items: [], total: 0, page: 1, pageSize: 50 },
+  familyMinimums: { gpt: null, grok: null },
   changes: { items: [], total: 0, page: 1, pageSize: 100 },
   changeSiteId: null,
   sites: { items: [], total: 0, page: 1, pageSize: 200 },
   editingSite: null,
+  notificationChannels: [],
+  notificationLogs: { items: [], total: 0, page: 1, pageSize: 50 },
+  notificationSites: [],
+  editingNotification: null,
   browserAuthSupported: false,
   loading: false
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
+const BASE_PATH = window.location.pathname.startsWith("/ratio-console/") ? "/ratio-console" : "";
+const appPath = (path) => `${BASE_PATH}${path}`;
 
 await init();
 
@@ -43,6 +50,8 @@ function bindEvents() {
   $("#site-form").addEventListener("submit", safeHandler(saveSite));
   $("#bulk-form").addEventListener("submit", safeHandler(bulkAddSites));
   $("#schedule-form").addEventListener("submit", safeHandler(saveGlobalSchedule));
+  $("#dynamic-ratio-form").addEventListener("submit", safeHandler(saveDynamicRatioSettings));
+
   $("#category-form").addEventListener("submit", safeHandler(addCategory));
   $("#rotate-api-key").addEventListener("click", safeHandler(rotateApiKey));
   $("#export-json").addEventListener("click", safeHandler(exportJson));
@@ -56,6 +65,11 @@ function bindEvents() {
   $("#sites-body").addEventListener("click", safeHandler(handleSiteAction));
   $("#rates-body").addEventListener("click", safeHandler(handleRateAction));
   $("#category-list").addEventListener("click", safeHandler(handleCategoryAction));
+  $("#add-notification-channel").addEventListener("click", () => openNotificationDialog());
+  $("#notification-type").addEventListener("change", updateNotificationConfigFields);
+  $("#notification-form").addEventListener("submit", safeHandler(saveNotificationChannel));
+  $("#notification-policy-form").addEventListener("submit", safeHandler(saveNotificationPolicy));
+  $("#notification-channels-body").addEventListener("click", safeHandler(handleNotificationAction));
   $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
 }
 
@@ -75,6 +89,7 @@ async function switchView(view) {
     rates: ["RATE INDEX", "最新分组倍率"],
     changes: ["CHANGE LOG", "最近变化"],
     sites: ["SITE REGISTRY", "站点管理"],
+    notifications: ["NOTIFICATION CENTER", "通知中心"],
     settings: ["SCHEDULER", "采集设置"]
   };
   $("#view-kicker").textContent = labels[view][0];
@@ -82,6 +97,7 @@ async function switchView(view) {
   if (view === "rates") await loadRates();
   if (view === "changes") await loadChanges();
   if (view === "sites") await loadSites();
+  if (view === "notifications") await loadNotifications();
   if (view === "settings") await loadSettings();
 }
 
@@ -135,6 +151,12 @@ function renderChanges() {
         <td>${badge(change.severity, change.severity === "critical" ? "danger" : change.severity === "warning" ? "accent" : "neutral")}</td>
       </tr>`).join("")
     : '<tr class="empty"><td colspan="7">暂无变化记录</td></tr>';
+  const items = state.changes.items;
+  $("#changes-total-count").textContent = state.changes.total;
+  $("#changes-up-count").textContent = items.filter((item) => item.changeType === "ratio_changed" && Number(item.changePercent) > 0).length;
+  $("#changes-down-count").textContent = items.filter((item) => item.changeType === "ratio_changed" && Number(item.changePercent) < 0).length;
+  $("#changes-added-count").textContent = items.filter((item) => item.changeType === "group_added").length;
+  $("#changes-removed-count").textContent = items.filter((item) => item.changeType === "group_removed").length;
 }
 
 async function loadRates() {
@@ -144,6 +166,7 @@ async function loadRates() {
     categoryId: $("#category-filter").value,
     tag: $("#tag-filter").value,
     platform: $("#platform-filter").value,
+    modelFamily: $("#model-family-filter").value,
     status: $("#group-status-filter").value,
     authStatus: $("#auth-filter").value,
     visibility: $("#rate-visibility").value,
@@ -153,7 +176,16 @@ async function loadRates() {
     pageSize: state.rates.pageSize
   });
   try {
-    state.rates = await api(`/api/rates?${params}`);
+    const [rates, gpt, grok] = await Promise.all([
+      api(`/api/rates?${params}`),
+      api("/api/rates?modelFamily=gpt&status=active&sortBy=rate&sortDir=asc&page=1&pageSize=1"),
+      api("/api/rates?modelFamily=grok&status=active&sortBy=rate&sortDir=asc&page=1&pageSize=1")
+    ]);
+    state.rates = rates;
+    state.familyMinimums = {
+      gpt: gpt.items[0]?.effectiveRateMultiplier ?? null,
+      grok: grok.items[0]?.effectiveRateMultiplier ?? null
+    };
     renderRates();
   } catch (error) {
     renderTableError("#rates-body", 8, error.message);
@@ -173,14 +205,14 @@ function renderRates() {
       <tr>
         <td><div class="primary-cell"><strong>${escapeHtml(rate.siteName)}</strong><span>${escapeHtml(hostname(rate.baseUrl))}</span></div></td>
         <td>${rate.categoryName ? badge(rate.categoryName, "neutral") : '<span class="muted">未分类</span>'}</td>
-        <td><div class="primary-cell"><strong>${escapeHtml(rate.groupName)}</strong><span>${escapeHtml(rate.platform || "未标记平台")}</span></div></td>
+        <td><div class="primary-cell"><strong>${escapeHtml(rate.groupName)}</strong><span>${escapeHtml(rate.platform || "未标记平台")} · ${badge(modelFamilyLabel(rate.modelFamily), rate.modelFamily === "grok" ? "accent" : "neutral")}</span></div></td>
         <td>${statusBadge(rate.status || "active")}</td>
         <td class="numeric">${formatRate(rate.baseRateMultiplier)}</td>
         <td class="numeric rate-value">${formatRate(rate.effectiveRateMultiplier)}</td>
         <td class="numeric">${formatCurrentAccountRate(rate)}</td>
         <td class="time-cell">${formatDate(rate.validFrom)}</td>
         <td class="row-actions">
-          <button type="button" data-action="open-site" data-base-url="${escapeAttr(rate.baseUrl)}" title="在新窗口打开 ${escapeAttr(rate.siteName)}">跳转</button>
+          <button type="button" data-action="open-site" data-base-url="${escapeAttr(rate.baseUrl)}" data-provider-id="${escapeAttr(rate.providerId)}" title="在新窗口打开 ${escapeAttr(rate.siteName)}">跳转</button>
           <button type="button" data-action="history" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}" data-label="${escapeAttr(`${rate.siteName} / ${rate.groupName}`)}">历史</button>
           ${rate.hidden
             ? `<button type="button" data-action="restore" data-site-id="${rate.siteId}" data-group-id="${escapeAttr(rate.groupId)}">恢复</button>`
@@ -193,6 +225,8 @@ function renderRates() {
   $("#metric-groups").textContent = state.rates.total;
   $("#metric-sites").textContent = sites.size;
   $("#metric-min").textContent = items.length ? formatRate(Math.min(...items.map((item) => item.effectiveRateMultiplier))) : "—";
+  $("#metric-gpt-min").textContent = formatRate(state.familyMinimums.gpt);
+  $("#metric-grok-min").textContent = formatRate(state.familyMinimums.grok);
   $("#metric-auth").textContent = loginRequired;
   const pages = Math.max(1, Math.ceil(state.rates.total / state.rates.pageSize));
   $("#rate-page-label").textContent = `第 ${state.rates.page} / ${pages} 页 · ${state.rates.total} 条`;
@@ -215,7 +249,7 @@ async function loadSites() {
     state.sites = await api(`/api/sites?${params}`);
     renderSites();
   } catch (error) {
-    renderTableError("#sites-body", 7, error.message);
+    renderTableError("#sites-body", 8, error.message);
     showError(error);
   } finally {
     setLoading(false, "sites");
@@ -229,6 +263,7 @@ function renderSites() {
         <td><div class="primary-cell"><strong>${escapeHtml(site.name)}</strong><span title="${escapeAttr(site.baseUrl)}">${escapeHtml(site.baseUrl)}</span></div></td>
         <td><div class="tag-stack">${site.categoryName ? badge(site.categoryName, "neutral") : ""}${site.tags.map((tag) => badge(tag)).join("") || '<span class="muted">无标签</span>'}</div></td>
         <td>${authBadge(site.authStatus)}<span class="override-note">${escapeHtml(authModeLabel(site.authMode))}${site.authUsername ? ` · ${escapeHtml(site.authUsername)}` : ""}</span></td>
+        <td>${balanceCell(site)}</td>
         <td><strong>${site.effectiveScheduleMinutes} 分钟</strong>${site.scheduleMinutes ? '<span class="override-note">站点覆盖</span>' : ""}</td>
         <td class="time-cell">${formatDate(site.nextRunAt)}</td>
         <td class="time-cell">${formatDate(site.lastCollectedAt)}</td>
@@ -240,7 +275,14 @@ function renderSites() {
           <button class="danger" type="button" data-action="delete" data-id="${site.id}" title="删除站点">×</button>
         </td>
       </tr>`).join("")
-    : '<tr class="empty"><td colspan="7">还没有站点，先添加一个</td></tr>';
+    : '<tr class="empty"><td colspan="8">还没有站点，先添加一个</td></tr>';
+  const known = state.sites.items.filter((site) => site.balanceStatus === "known" && Number.isFinite(Number(site.balanceUsd)));
+  const low = known.filter(isLowBalance);
+  const issues = state.sites.items.filter((site) => ["unavailable", "error"].includes(site.balanceStatus));
+  $("#balance-known-count").textContent = known.length;
+  $("#balance-total-value").textContent = known.length ? formatCurrency(known.reduce((sum, site) => sum + Number(site.balanceUsd), 0)) : "—";
+  $("#balance-low-count").textContent = low.length;
+  $("#balance-issue-count").textContent = issues.length;
 }
 
 async function handleSiteAction(event) {
@@ -275,7 +317,7 @@ async function handleRateAction(event) {
   if (!button) return;
   const action = button.dataset.action;
   if (action === "open-site") {
-    const target = safeExternalUrl(button.dataset.baseUrl);
+    const target = safeExternalUrl(button.dataset.baseUrl, button.dataset.providerId);
     if (!target) throw new Error("站点地址无效，无法跳转");
     window.open(target, "_blank", "noopener,noreferrer");
     return;
@@ -314,6 +356,7 @@ function openSiteDialog(site = null) {
   $("#site-category").value = site?.categoryId ?? "";
   $("#site-schedule").value = site?.scheduleMinutes ?? "";
   $("#site-rate-conversion-factor").value = site?.rateConversionFactor ?? 1;
+  $("#site-balance-threshold").value = site?.balanceThresholdUsd ?? "";
   $("#site-tags").value = site?.tags?.join(", ") ?? "";
   $("#site-enabled").checked = site?.enabled ?? true;
   $("#credential-email").value = "";
@@ -337,6 +380,7 @@ async function saveSite(event) {
     categoryId: $("#site-category").value || null,
     scheduleMinutes: $("#site-schedule").value || null,
     rateConversionFactor: Number($("#site-rate-conversion-factor").value),
+    balanceThresholdUsd: $("#site-balance-threshold").value === "" ? null : Number($("#site-balance-threshold").value),
     tags: splitTags($("#site-tags").value),
     enabled: $("#site-enabled").checked
   };
@@ -377,9 +421,235 @@ async function refreshAllSites() {
   await Promise.all([loadRates(), state.view === "sites" ? loadSites() : Promise.resolve()]);
 }
 
+async function loadNotifications() {
+  const [channels, logs, policy, sites, sent, failed] = await Promise.all([
+    api("/api/notifications/channels"),
+    api("/api/notifications/logs?page=1&pageSize=50"),
+    api("/api/notifications/policy"),
+    api("/api/sites?page=1&pageSize=200&sortBy=name&sortDir=asc"),
+    api("/api/notifications/logs?page=1&pageSize=1&status=sent"),
+    api("/api/notifications/logs?page=1&pageSize=1&status=failed")
+  ]);
+  state.notificationChannels = channels.items;
+  state.notificationLogs = logs;
+  state.notificationSites = sites.items;
+  renderNotificationChannels();
+  renderNotificationLogs();
+  fillNotificationSites();
+  $("#policy-min-ratio-change").value = policy.minRatioChangePercent;
+  $("#policy-balance-cooldown").value = policy.balanceCooldownHours;
+  $("#policy-failure-cooldown").value = policy.failureCooldownMinutes;
+  $("#policy-retry-attempts").value = policy.retryAttempts;
+  $("#notification-enabled-count").textContent = state.notificationChannels.filter((channel) => channel.enabled).length;
+  $("#notification-success-count").textContent = sent.total;
+  $("#notification-failed-count").textContent = failed.total;
+  $("#notification-low-balance-count").textContent = state.notificationSites.filter(isLowBalance).length;
+}
+
+function renderNotificationChannels() {
+  $("#notification-channels-body").innerHTML = state.notificationChannels.length
+    ? state.notificationChannels.map((channel) => `
+      <tr>
+        <td><div class="primary-cell"><strong>${escapeHtml(channel.name)}</strong><span>${channel.configured ? "配置完整" : "等待配置"}</span></div></td>
+        <td>${escapeHtml(notificationTypeLabel(channel.type))}</td>
+        <td>${badge(channel.enabled ? "已启用" : "已停用", channel.enabled ? "success" : "neutral")}${channel.configured ? "" : ` ${badge("未配置", "danger")}`}</td>
+        <td>${channel.subscriptions.length ? `${channel.subscriptions.length} 个站点` : "全部站点"}</td>
+        <td><div class="tag-stack">${channel.eventTypes.length ? channel.eventTypes.map((type) => badge(changeTypeLabel(type), "neutral")).join("") : '<span class="muted">全部事件</span>'}</div></td>
+        <td class="time-cell">${formatDate(channel.updatedAt)}</td>
+        <td class="row-actions notification-actions">
+          <button type="button" data-action="edit" data-id="${channel.id}">编辑</button>
+          <button type="button" data-action="toggle" data-id="${channel.id}">${channel.enabled ? "停用" : "启用"}</button>
+          <button type="button" data-action="test" data-id="${channel.id}" ${channel.configured ? "" : "disabled"}>测试</button>
+          <button class="danger" type="button" data-action="delete" data-id="${channel.id}" aria-label="删除 ${escapeAttr(channel.name)}">×</button>
+        </td>
+      </tr>`).join("")
+    : '<tr class="empty"><td colspan="7">还没有通知渠道</td></tr>';
+}
+
+function renderNotificationLogs() {
+  $("#notification-logs-body").innerHTML = state.notificationLogs.items.length
+    ? state.notificationLogs.items.map((log) => `
+      <tr>
+        <td class="time-cell">${formatDate(log.createdAt)}</td>
+        <td><strong>${escapeHtml(log.channelName || "已删除渠道")}</strong></td>
+        <td>${escapeHtml(changeTypeLabel(log.eventType))}</td>
+        <td>${badge(log.status === "sent" ? "成功" : "失败", log.status === "sent" ? "success" : "danger")}</td>
+        <td class="numeric">${Number(log.attempts)}</td>
+        <td class="log-error" title="${escapeAttr(log.errorMessage || "")}">${escapeHtml(log.errorMessage || "—")}</td>
+      </tr>`).join("")
+    : '<tr class="empty"><td colspan="6">暂无发送记录</td></tr>';
+}
+
+function fillNotificationSites(selected = []) {
+  const selectedIds = new Set(selected.map(Number));
+  $("#notification-sites").innerHTML = state.notificationSites.map((site) =>
+    `<option value="${site.id}" ${selectedIds.has(site.id) ? "selected" : ""}>${escapeHtml(site.name)}</option>`
+  ).join("");
+}
+
+function openNotificationDialog(channel = null) {
+  state.editingNotification = channel;
+  $("#notification-dialog-title").textContent = channel ? "编辑通知渠道" : "添加通知渠道";
+  $("#notification-id").value = channel?.id ?? "";
+  $("#notification-name").value = channel?.name ?? "";
+  $("#notification-type").value = channel?.type ?? "telegram";
+  $("#notification-enabled").checked = channel?.enabled ?? true;
+  fillNotificationSites(channel?.subscriptions ?? []);
+  $$("#notification-events input[type=checkbox]").forEach((input) => {
+    input.checked = channel?.eventTypes?.includes(input.value) ?? false;
+  });
+  clearNotificationSecrets();
+  updateNotificationConfigFields();
+  $("#notification-config-state").textContent = channel?.configured
+    ? `已保存配置（${channel.configFields.map(notificationConfigFieldLabel).join("、")}）；留空将保留原配置。`
+    : "该渠道尚未配置发送参数。";
+  $("#notification-dialog").showModal();
+}
+
+function clearNotificationSecrets() {
+  $("#notification-bot-token").value = "";
+  $("#notification-smtp-password").value = "";
+  $("#notification-signing-secret").value = "";
+  for (const selector of ["#notification-chat-id", "#notification-webhook-url", "#notification-webhook-headers", "#notification-smtp-host", "#notification-smtp-username", "#notification-email-from", "#notification-email-recipients", "#notification-platform-webhook-url"]) {
+    $(selector).value = "";
+  }
+  $("#notification-webhook-method").value = "POST";
+  $("#notification-smtp-port").value = "587";
+  $("#notification-smtp-secure").checked = false;
+  $("#notification-smtp-tls").checked = true;
+}
+
+function updateNotificationConfigFields() {
+  const type = $("#notification-type").value;
+  $$('[data-notification-config]').forEach((group) => {
+    const target = group.dataset.notificationConfig;
+    group.hidden = target !== type && !(target === "platform" && ["wecom", "dingtalk", "feishu"].includes(type));
+  });
+  $("#notification-secret-field").hidden = type === "wecom";
+  const canKeepConfig = state.editingNotification?.configured && state.editingNotification.type === type;
+  const required = !canKeepConfig;
+  for (const selector of requiredNotificationFields(type)) $(selector).required = required;
+  for (const input of $$("#notification-config-fields input, #notification-config-fields textarea")) {
+    if (!requiredNotificationFields(type).includes(`#${input.id}`)) input.required = false;
+  }
+}
+
+function requiredNotificationFields(type) {
+  if (type === "telegram") return ["#notification-bot-token", "#notification-chat-id"];
+  if (type === "webhook") return ["#notification-webhook-url"];
+  if (type === "email") return ["#notification-smtp-host", "#notification-smtp-port", "#notification-email-from", "#notification-email-recipients"];
+  return ["#notification-platform-webhook-url"];
+}
+
+async function saveNotificationChannel(event) {
+  event.preventDefault();
+  const id = $("#notification-id").value;
+  const type = $("#notification-type").value;
+  const body = {
+    name: $("#notification-name").value.trim(),
+    type,
+    enabled: $("#notification-enabled").checked,
+    subscriptions: [...$("#notification-sites").selectedOptions].map((option) => Number(option.value)),
+    eventTypes: $$("#notification-events input:checked").map((input) => input.value),
+    config: notificationConfig(type)
+  };
+  await api(id ? `/api/notifications/channels/${id}` : "/api/notifications/channels", { method: id ? "PATCH" : "POST", body });
+  $("#notification-dialog").close();
+  clearNotificationSecrets();
+  showToast(id ? "通知渠道已更新" : "通知渠道已添加");
+  await loadNotifications();
+}
+
+function notificationConfig(type) {
+  if (type === "telegram") {
+    if (!$("#notification-bot-token").value && !$("#notification-chat-id").value) return {};
+    return { botToken: $("#notification-bot-token").value, chatId: $("#notification-chat-id").value };
+  }
+  if (type === "webhook") {
+    if (!$("#notification-webhook-url").value && !$("#notification-webhook-headers").value.trim()) return {};
+    return {
+      url: $("#notification-webhook-url").value,
+      method: $("#notification-webhook-method").value,
+      headers: JSON.parse($("#notification-webhook-headers").value || "{}")
+    };
+  }
+  if (type === "email") {
+    if (!$("#notification-smtp-host").value && !$("#notification-email-from").value && !$("#notification-email-recipients").value) return {};
+    return {
+      host: $("#notification-smtp-host").value,
+      port: Number($("#notification-smtp-port").value),
+      secure: $("#notification-smtp-secure").checked,
+      useTls: $("#notification-smtp-tls").checked,
+      username: $("#notification-smtp-username").value,
+      password: $("#notification-smtp-password").value,
+      from: $("#notification-email-from").value,
+      recipients: $("#notification-email-recipients").value.split(/[,，]/).map((value) => value.trim()).filter(Boolean)
+    };
+  }
+  if (!$("#notification-platform-webhook-url").value && !$("#notification-signing-secret").value) return {};
+  const config = { webhookUrl: $("#notification-platform-webhook-url").value };
+  if (type !== "wecom" && $("#notification-signing-secret").value) config.secret = $("#notification-signing-secret").value;
+  return config;
+}
+
+async function handleNotificationAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const id = Number(button.dataset.id);
+  const channel = state.notificationChannels.find((item) => item.id === id);
+  if (!channel) return;
+  if (button.dataset.action === "edit") return openNotificationDialog(channel);
+  if (button.dataset.action === "delete") {
+    if (!confirm(`删除通知渠道“${channel.name}”？发送配置和历史关联会一并清理。`)) return;
+    await withButton(button, () => api(`/api/notifications/channels/${id}`, { method: "DELETE" }));
+    showToast("通知渠道已删除");
+  } else if (button.dataset.action === "toggle") {
+    await withButton(button, () => api(`/api/notifications/channels/${id}`, { method: "PATCH", body: { enabled: !channel.enabled } }));
+    showToast(channel.enabled ? "通知渠道已停用" : "通知渠道已启用");
+  } else if (button.dataset.action === "test") {
+    await withButton(button, () => testNotificationChannel(id));
+    showToast("测试通知已发送");
+  }
+  await loadNotifications();
+}
+
+async function testNotificationChannel(id) {
+  const response = await fetch(appPath(`/api/notifications/channels/${id}/test`), { method: "POST" });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || `请求失败：HTTP ${response.status}`);
+  return data;
+}
+
+async function saveNotificationPolicy(event) {
+  event.preventDefault();
+  await api("/api/notifications/policy", {
+    method: "PUT",
+    body: {
+      minRatioChangePercent: Number($("#policy-min-ratio-change").value),
+      balanceCooldownHours: Number($("#policy-balance-cooldown").value),
+      failureCooldownMinutes: Number($("#policy-failure-cooldown").value),
+      retryAttempts: Number($("#policy-retry-attempts").value)
+    }
+  });
+  showToast("通知策略已保存");
+}
+
 async function loadSettings() {
-  const [, , keyStatus] = await Promise.all([loadStatus(), loadReferenceData(), api("/api/settings/api-key")]);
+  const [, , keyStatus, dynamicRatio] = await Promise.all([loadStatus(), loadReferenceData(), api("/api/settings/api-key"), api("/api/settings/dynamic-ratio")]);
   $("#api-key-status").textContent = keyStatus.configured ? "API Key 已配置" : "尚未配置 API Key";
+  for (const family of ["gpt", "grok"]) {
+    const policy = dynamicRatio.policies.find((item) => item.family === family);
+    if (!policy) throw new Error(`缺少 ${family.toUpperCase()} 动态倍率策略`);
+    $(`#dynamic-${family}-enabled`).checked = policy.enabled;
+    $(`#dynamic-${family}-group`).value = policy.group;
+    $(`#dynamic-${family}-service-multiplier`).value = policy.serviceMultiplier;
+    $(`#dynamic-${family}-minimum`).value = policy.minimum;
+    $(`#dynamic-${family}-maximum`).value = policy.maximum;
+    $(`#dynamic-${family}-threshold`).value = policy.changeThreshold;
+    $(`#dynamic-${family}-status`).textContent = policy.enabled
+      ? `已启用：${family.toUpperCase()} 最低有效倍率 × ${policy.serviceMultiplier} → ${policy.group}`
+      : family === "grok" ? "Grok 渠道分组待配置；当前不会写入生产倍率" : "自动同步未启用";
+  }
 }
 
 async function rotateApiKey() {
@@ -457,7 +727,7 @@ async function importSiteTransfer(event) {
 }
 
 async function downloadArtifact(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appPath(path), {
     method: options.method ?? "GET",
     headers: options.body ? { "Content-Type": "application/json" } : {},
     body: options.body ? JSON.stringify(options.body) : undefined
@@ -563,6 +833,30 @@ async function saveGlobalSchedule(event) {
   showToast("默认采集频率已保存");
 }
 
+async function saveDynamicRatioSettings(event) {
+  event.preventDefault();
+  const policies = ["gpt", "grok"].map((family) => ({
+    family,
+    enabled: $(`#dynamic-${family}-enabled`).checked,
+    group: $(`#dynamic-${family}-group`).value.trim(),
+    serviceMultiplier: Number($(`#dynamic-${family}-service-multiplier`).value),
+    minimum: Number($(`#dynamic-${family}-minimum`).value),
+    maximum: Number($(`#dynamic-${family}-maximum`).value),
+    changeThreshold: Number($(`#dynamic-${family}-threshold`).value)
+  }));
+  const settings = await api("/api/settings/dynamic-ratio", {
+    method: "PUT",
+    body: { version: 2, policies }
+  });
+  for (const policy of settings.policies) {
+    $(`#dynamic-${policy.family}-status`).textContent = policy.enabled
+      ? `已启用：${policy.family.toUpperCase()} 最低有效倍率 × ${policy.serviceMultiplier} → ${policy.group}`
+      : policy.family === "grok" ? "Grok 渠道分组待配置；当前不会写入生产倍率" : "自动同步未启用";
+  }
+  showToast("GPT / Grok 独立倍率策略已保存");
+}
+
+
 async function addCategory(event) {
   event.preventDefault();
   await api("/api/categories", {
@@ -612,7 +906,7 @@ function mergePlatformOptions(platforms) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(appPath(path), {
     method: options.method ?? "GET",
     headers: options.body === undefined ? {} : { "Content-Type": "application/json" },
     body: options.body === undefined ? undefined : JSON.stringify(options.body)
@@ -668,11 +962,38 @@ function authModeLabel(mode) {
 function changeTypeLabel(type) {
   return {
     group_added: "新增分组", group_removed: "删除分组", ratio_changed: "倍率变化",
+    balance_low: "余额过低", auth_failed: "认证失败", collection_failed: "采集失败", test: "渠道测试", batch: "批量事件",
     desc_changed: "说明变化", status_changed: "状态变化", subscription_type_changed: "订阅变化",
     billing_type_changed: "计费变化", rpm_limit_changed: "RPM 变化", is_exclusive_changed: "专属属性变化",
     limits_changed: "额度变化", peak_rule_changed: "峰值规则变化", group_name_changed: "分组名称变化",
     platform_changed: "平台变化"
   }[type] ?? type;
+}
+function isLowBalance(site) {
+  return site.balanceStatus === "known"
+    && Number.isFinite(Number(site.balanceUsd))
+    && site.balanceThresholdUsd !== null
+    && site.balanceThresholdUsd !== undefined
+    && Number(site.balanceUsd) <= Number(site.balanceThresholdUsd);
+}
+function balanceCell(site) {
+  const status = isLowBalance(site) ? "low" : site.balanceStatus || "unknown";
+  const labels = { known: "正常", low: "低余额", unknown: "未知", unavailable: "不可用", error: "异常" };
+  const value = site.balanceStatus === "known" && Number.isFinite(Number(site.balanceUsd)) ? formatCurrency(site.balanceUsd) : "—";
+  const detail = site.balanceError || (site.balanceUpdatedAt ? `更新于 ${formatDate(site.balanceUpdatedAt)}` : "尚无余额数据");
+  return `<div class="balance-cell"><strong>${escapeHtml(value)}</strong><span class="balance-status ${escapeAttr(status)}" title="${escapeAttr(detail)}">${escapeHtml(labels[status] ?? status)}</span></div>`;
+}
+function formatCurrency(value) {
+  return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value));
+}
+function modelFamilyLabel(family) {
+  return { gpt: "GPT", grok: "Grok", other: "其他" }[family] ?? "未分类";
+}
+function notificationTypeLabel(type) {
+  return { telegram: "Telegram", webhook: "Webhook", email: "Email", wecom: "企业微信", dingtalk: "钉钉", feishu: "飞书" }[type] ?? type;
+}
+function notificationConfigFieldLabel(field) {
+  return { botToken: "Bot Token", chatId: "Chat ID", url: "URL", method: "请求方法", headers: "Headers", host: "SMTP 主机", port: "SMTP 端口", secure: "SMTPS", useTls: "STARTTLS", username: "用户名", password: "密码", from: "发件人", recipients: "收件人", webhookUrl: "Webhook URL", secret: "签名密钥" }[field] ?? field;
 }
 function formatChangeValue(value) {
   if (value === null || value === undefined || value === "") return "—";
@@ -689,15 +1010,30 @@ function formatCurrentAccountRate(rate) {
   if (rate.siteCurrentRateMultiplier === null || rate.siteCurrentRateMultiplier === undefined) {
     return '<span class="muted" title="当前账号未选择固定倍率或站点未提供密钥分组信息">—</span>';
   }
-  return `<strong class="rate-value" title="登录账号当前选择的倍率">${escapeHtml(formatRate(rate.siteCurrentRateMultiplier))}</strong>`;
+  const currentRate = Number(rate.siteCurrentRateMultiplier);
+  const effectiveRate = Number(rate.effectiveRateMultiplier);
+  const overpriced = Number.isFinite(currentRate)
+    && Number.isFinite(effectiveRate)
+    && Number(rate.siteCurrentRateMultiplier) > Number(rate.effectiveRateMultiplier);
+  const className = overpriced ? "rate-value overpriced" : "rate-value";
+  const identityHint = rate.modelFamily === "grok"
+    ? "Grok 用密钥 grok"
+    : "GPT 用 1111";
+  const title = overpriced
+    ? `登录账号当前倍率高于该分组实际倍率（${identityHint}）`
+    : `登录账号当前选择的倍率（${identityHint}）`;
+  return `<strong class="${className}" title="${title}">${escapeHtml(formatRate(rate.siteCurrentRateMultiplier))}</strong>`;
 }
 function formatDate(value) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "—"; }
 function hostname(value) { try { return new URL(value).hostname; } catch { return value || ""; } }
-function safeExternalUrl(value) {
+function safeExternalUrl(value, providerId) {
   try {
     const url = new URL(value);
     if (!["https:", "http:"].includes(url.protocol)) return "";
-    url.pathname = `${url.pathname.replace(/\/+$/, "")}/keys`;
+    const suffix = providerId === "newapi"
+      ? (url.hostname === "api.skyhold.cloud" ? "/keys" : "/console/token")
+      : "/keys";
+    url.pathname = `${url.pathname.replace(/\/+$/, "")}${suffix}`;
     url.search = "";
     url.hash = "";
     return url.href;

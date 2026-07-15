@@ -29,6 +29,49 @@ test("status API reports whether browser authentication is supported", async () 
   }
 });
 
+test("notification management routes provide CRUD, test, logs and policy without external exposure", async () => {
+  const calls = [];
+  const channels = new Map();
+  let nextId = 1;
+  const notificationService = {
+    async createChannel(input) { const value = { id: nextId++, name: input.name, type: input.type, enabled: true, configured: true }; channels.set(value.id, value); calls.push(["create", input]); return value; },
+    async listChannels() { return [...channels.values()]; },
+    async updateChannel(id, patch) { const value = { ...channels.get(id), ...patch }; channels.set(id, value); return value; },
+    async deleteChannel(id) { calls.push(["delete", id]); return channels.delete(id); },
+    async testChannel(id) { calls.push(["test", id]); return { status: "sent", attempts: 1 }; },
+    async listLogs(options) { calls.push(["logs", options]); return { items: [], total: 0, page: 1, pageSize: 50 }; }
+  };
+  const repository = {
+    getExternalApiKeyHash() { return ""; },
+    setExternalApiKeyHash() {},
+    getNotificationPolicy() { return { cooldownMinutes: 30, minRatioChangePercent: 1 }; },
+    setNotificationPolicy(value) { calls.push(["policy", value]); return value; }
+  };
+  const route = createApiRouter({ repository, notificationService });
+
+  const invoke = (method, pathname, body = {}) => route({
+    method, url: new URL(pathname, "http://localhost"), body, remoteAddress: "127.0.0.1"
+  });
+  const created = await invoke("POST", "/api/notifications/channels", { name: "Ops", type: "webhook", config: { url: "https://secret" } });
+  assert.equal(created.status, 201);
+  assert.equal((await invoke("GET", "/api/notifications/channels")).body.items.length, 1);
+  assert.equal((await invoke("PATCH", "/api/notifications/channels/1", { name: "Ops 2" })).body.name, "Ops 2");
+  assert.equal((await invoke("POST", "/api/notifications/channels/1/test")).body.status, "sent");
+  assert.equal((await invoke("GET", "/api/notifications/logs?page=1&pageSize=20&channelId=1")).body.total, 0);
+  assert.equal((await invoke("GET", "/api/notifications/policy")).body.cooldownMinutes, 30);
+  assert.equal((await invoke("PUT", "/api/notifications/policy", { cooldownMinutes: 10, minRatioChangePercent: 2 })).body.cooldownMinutes, 10);
+  assert.equal((await invoke("DELETE", "/api/notifications/channels/1")).status, 204);
+  await assert.rejects(
+    () => route({ method: "GET", url: new URL("/api/notifications/channels", "http://localhost"), remoteAddress: "192.168.1.2" }),
+    (error) => error.code === "MANAGEMENT_LOCAL_ONLY"
+  );
+  await assert.rejects(
+    () => invoke("GET", "/api/external/v1/notifications"),
+    (error) => error.status === 404
+  );
+  assert.equal(JSON.stringify(calls).includes("https://secret"), true);
+});
+
 test("management API supports category, site, tag, schedule and pagination workflows", async () => {
   const fixture = await createFixture();
   try {

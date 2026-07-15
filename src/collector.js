@@ -5,6 +5,7 @@ export function createCollector({
   authManager,
   getProvider,
   queue,
+  notificationService,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   clock = () => new Date()
 }) {
@@ -32,12 +33,28 @@ export function createCollector({
               mode: "user",
               includeKeys: true
             });
-            repository.saveCollection(site.id, result, result.fetchedAt ?? clock().toISOString(), runId);
+            const saved = repository.saveCollection(site.id, result, result.fetchedAt ?? clock().toISOString(), runId);
             repository.finishRun(runId, {
               status: "success",
               finishedAt: clock().toISOString(),
               durationMs: Math.max(0, clock() - startedAt)
             });
+            enqueue("enqueueCollectionChanges", saved.changes);
+            const balanceUsd = Number(result.account?.balanceUsd);
+            const balanceThresholdUsd = Number(site.balanceThresholdUsd);
+            if (result.account?.status === "known"
+              && Number.isFinite(balanceUsd)
+              && Number.isFinite(balanceThresholdUsd)
+              && balanceThresholdUsd > 0
+              && balanceUsd <= balanceThresholdUsd) {
+              enqueue("enqueueEvent", {
+                siteId: site.id,
+                siteName: site.name,
+                changeType: "balance_low",
+                balanceUsd,
+                balanceThresholdUsd
+              });
+            }
             return result;
           } catch (error) {
             if (error?.status === 401 && !authRefreshed) {
@@ -68,6 +85,11 @@ export function createCollector({
           errorCode: classified.code,
           errorMessage: classified.message
         });
+        enqueue("enqueueEvent", {
+          siteId: site.id,
+          siteName: site.name,
+          changeType: classified.code === "LOGIN_REQUIRED" ? "auth_failed" : "collection_failed"
+        });
         throw error;
       }
     }, { timeoutMs: options.timeoutMs });
@@ -94,6 +116,14 @@ export function createCollector({
   }
 
   return { collectSite, collectMany, probeSite };
+
+  function enqueue(method, payload) {
+    if (!notificationService || (Array.isArray(payload) && payload.length === 0)) return;
+    try {
+      const pending = notificationService[method]?.(payload);
+      pending?.catch?.(() => {});
+    } catch {}
+  }
 }
 
 export function classifyCollectionError(error) {

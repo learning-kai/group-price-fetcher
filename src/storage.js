@@ -20,6 +20,7 @@ const RATE_SORTS = new Map([
   ["platform", "r.platform"],
   ["updatedAt", "r.valid_from"]
 ]);
+const MODEL_FAMILIES = new Set(["gpt", "grok", "other"]);
 
 export function createRepository({ dbPath = ":memory:", clock = () => new Date() } = {}) {
   if (dbPath !== ":memory:") mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -187,6 +188,151 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         throw error;
       }
     }
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 8) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("balance_usd")) db.exec("ALTER TABLE sites ADD COLUMN balance_usd REAL");
+        if (!columns.has("balance_status")) db.exec("ALTER TABLE sites ADD COLUMN balance_status TEXT NOT NULL DEFAULT 'unknown'");
+        if (!columns.has("balance_source")) db.exec("ALTER TABLE sites ADD COLUMN balance_source TEXT NOT NULL DEFAULT ''");
+        if (!columns.has("balance_updated_at")) db.exec("ALTER TABLE sites ADD COLUMN balance_updated_at TEXT");
+        if (!columns.has("balance_error")) db.exec("ALTER TABLE sites ADD COLUMN balance_error TEXT NOT NULL DEFAULT ''");
+        db.exec("PRAGMA user_version = 8; COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 9) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("balance_threshold_usd")) db.exec("ALTER TABLE sites ADD COLUMN balance_threshold_usd REAL");
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS notification_channels (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            type TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            subscriptions TEXT NOT NULL DEFAULT '[]',
+            event_types TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE TABLE IF NOT EXISTS notification_logs (
+            id INTEGER PRIMARY KEY,
+            channel_id INTEGER REFERENCES notification_channels(id) ON DELETE SET NULL,
+            channel_name TEXT NOT NULL DEFAULT '',
+            channel_type TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            message TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_notification_logs_created ON notification_logs(created_at DESC, id DESC);
+          CREATE INDEX IF NOT EXISTS idx_notification_logs_channel_created ON notification_logs(channel_id, created_at DESC, id DESC);
+          CREATE TABLE IF NOT EXISTS notification_cooldowns (
+            channel_id INTEGER NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+            cooldown_key TEXT NOT NULL,
+            last_sent_at TEXT NOT NULL,
+            PRIMARY KEY (channel_id, cooldown_key)
+          );
+          PRAGMA user_version = 9;
+          COMMIT;
+        `);
+      } catch (error) {
+        rollback();
+        throw error;
+      }
+    }
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 10) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("gpt_current_rate_multiplier")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_multiplier REAL");
+        if (!columns.has("gpt_current_rate_ambiguous")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_ambiguous INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("gpt_current_rate_count")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_count INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("gpt_current_rate_key_name")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_key_name TEXT NOT NULL DEFAULT ''");
+        if (!columns.has("grok_current_rate_multiplier")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_multiplier REAL");
+        if (!columns.has("grok_current_rate_ambiguous")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_ambiguous INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("grok_current_rate_count")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_count INTEGER NOT NULL DEFAULT 0");
+        if (!columns.has("grok_current_rate_group_name")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_group_name TEXT NOT NULL DEFAULT ''");
+        // Backfill GPT identity from legacy site-level current rate so old rows keep working.
+        db.exec(`
+          UPDATE sites
+          SET gpt_current_rate_multiplier = current_rate_multiplier,
+              gpt_current_rate_ambiguous = current_rate_ambiguous,
+              gpt_current_rate_count = current_rate_count,
+              gpt_current_rate_key_name = CASE
+                WHEN current_rate_multiplier IS NOT NULL THEN '1111'
+                ELSE ''
+              END
+          WHERE gpt_current_rate_multiplier IS NULL
+            AND current_rate_multiplier IS NOT NULL
+        `);
+        // Backfill Grok identity from the exact upstream group name/id "grok".
+        db.exec(`
+          UPDATE sites
+          SET grok_current_rate_multiplier = (
+                SELECT r.effective_rate_multiplier
+                FROM rate_versions r
+                WHERE r.site_id = sites.id
+                  AND r.valid_to IS NULL
+                  AND (trim(r.group_name) = 'grok' OR trim(r.group_id) = 'grok')
+                ORDER BY r.id DESC
+                LIMIT 1
+              ),
+              grok_current_rate_ambiguous = 0,
+              grok_current_rate_count = CASE WHEN EXISTS (
+                SELECT 1 FROM rate_versions r
+                WHERE r.site_id = sites.id
+                  AND r.valid_to IS NULL
+                  AND (trim(r.group_name) = 'grok' OR trim(r.group_id) = 'grok')
+              ) THEN 1 ELSE 0 END,
+              grok_current_rate_group_name = CASE WHEN EXISTS (
+                SELECT 1 FROM rate_versions r
+                WHERE r.site_id = sites.id
+                  AND r.valid_to IS NULL
+                  AND (trim(r.group_name) = 'grok' OR trim(r.group_id) = 'grok')
+              ) THEN 'grok' ELSE '' END
+          WHERE grok_current_rate_multiplier IS NULL
+        `);
+        db.exec("PRAGMA user_version = 10; COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 11) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("grok_current_rate_key_name")) {
+          db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_key_name TEXT NOT NULL DEFAULT ''");
+        }
+        // Grok identity is key-name based ("grok"), not group-name based.
+        // Clear any previous group-name backfill so stale values do not mislead until re-collection.
+        db.exec(`
+          UPDATE sites
+          SET grok_current_rate_multiplier = NULL,
+              grok_current_rate_ambiguous = 0,
+              grok_current_rate_count = 0,
+              grok_current_rate_group_name = '',
+              grok_current_rate_key_name = ''
+        `);
+        db.exec("PRAGMA user_version = 11; COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
   }
 
   function createCategory(input) {
@@ -247,8 +393,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       const result = db.prepare(`
         INSERT INTO sites(
           name, base_url, provider_id, category_id, schedule_minutes, enabled,
-          auth_mode, rate_conversion_factor, next_run_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          auth_mode, rate_conversion_factor, balance_threshold_usd, next_run_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         record.name,
         record.baseUrl,
@@ -258,6 +404,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         record.enabled ? 1 : 0,
         record.authMode,
         record.rateConversionFactor,
+        record.balanceThresholdUsd,
         now,
         now,
         now
@@ -284,7 +431,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       db.prepare(`
         UPDATE sites SET name = ?, base_url = ?, provider_id = ?, category_id = ?,
           schedule_minutes = ?, enabled = ?, auth_mode = ?, rate_conversion_factor = ?,
-          updated_at = ? WHERE id = ?
+          balance_threshold_usd = ?, updated_at = ? WHERE id = ?
       `).run(
         merged.name,
         merged.baseUrl,
@@ -294,6 +441,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         merged.enabled ? 1 : 0,
         merged.authMode,
         merged.rateConversionFactor,
+        merged.balanceThresholdUsd,
         iso(clock()),
         id
       );
@@ -372,6 +520,177 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
 
   function getGlobalSchedule() {
     return Number(db.prepare("SELECT value FROM settings WHERE key = 'global_schedule_minutes'").get()?.value ?? 60);
+  }
+
+  function createNotificationChannel(input) {
+    const now = iso(clock());
+    const record = normalizeNotificationChannel(input);
+    const result = db.prepare(`
+      INSERT INTO notification_channels(name, type, enabled, subscriptions, event_types, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(record.name, record.type, record.enabled ? 1 : 0, JSON.stringify(record.subscriptions), JSON.stringify(record.eventTypes), now, now);
+    return getNotificationChannel(Number(result.lastInsertRowid));
+  }
+
+  function updateNotificationChannel(id, patch) {
+    const current = getNotificationChannel(id);
+    if (!current) throw new Error(`通知渠道不存在：${id}`);
+    const record = normalizeNotificationChannel({ ...current, ...patch });
+    db.prepare(`
+      UPDATE notification_channels SET name = ?, type = ?, enabled = ?, subscriptions = ?, event_types = ?, updated_at = ?
+      WHERE id = ?
+    `).run(record.name, record.type, record.enabled ? 1 : 0, JSON.stringify(record.subscriptions), JSON.stringify(record.eventTypes), iso(clock()), id);
+    return getNotificationChannel(id);
+  }
+
+  function getNotificationChannel(id) {
+    const row = db.prepare("SELECT * FROM notification_channels WHERE id = ?").get(id);
+    return row ? mapNotificationChannel(row) : null;
+  }
+
+  function listNotificationChannels() {
+    return db.prepare("SELECT * FROM notification_channels ORDER BY name COLLATE NOCASE, id").all().map(mapNotificationChannel);
+  }
+
+  function deleteNotificationChannel(id) {
+    return db.prepare("DELETE FROM notification_channels WHERE id = ?").run(id).changes > 0;
+  }
+
+  function createNotificationLog(input) {
+    const channel = input.channelId ? getNotificationChannel(input.channelId) : null;
+    const result = db.prepare(`
+      INSERT INTO notification_logs(
+        channel_id, channel_name, channel_type, event_type, status, message,
+        error_code, error_message, attempts, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      channel?.id ?? null,
+      channel?.name ?? String(input.channelName ?? ""),
+      channel?.type ?? String(input.channelType ?? ""),
+      String(input.eventType ?? ""),
+      requiredText(input.status, "通知状态"),
+      String(input.message ?? "").slice(0, 2000),
+      String(input.errorCode ?? "").slice(0, 100),
+      String(input.errorMessage ?? "").slice(0, 1000),
+      positiveInteger(input.attempts ?? 1, "通知尝试次数"),
+      iso(input.createdAt ?? clock())
+    );
+    return mapNotificationLog(db.prepare("SELECT * FROM notification_logs WHERE id = ?").get(Number(result.lastInsertRowid)));
+  }
+
+  function listNotificationLogs(options = {}) {
+    const page = positiveInteger(options.page ?? 1, "页码");
+    const pageSize = Math.min(200, positiveInteger(options.pageSize ?? 50, "每页数量"));
+    const where = [];
+    const params = [];
+    if (options.channelId !== undefined && options.channelId !== null && options.channelId !== "") {
+      where.push("channel_id = ?");
+      params.push(positiveInteger(options.channelId, "通知渠道 ID"));
+    }
+    if (options.status) { where.push("status = ?"); params.push(String(options.status)); }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const total = Number(db.prepare(`SELECT COUNT(*) count FROM notification_logs ${clause}`).get(...params).count);
+    const items = db.prepare(`SELECT * FROM notification_logs ${clause} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(...params, pageSize, (page - 1) * pageSize).map(mapNotificationLog);
+    return { items, total, page, pageSize };
+  }
+
+  function getNotificationCooldown(channelId, cooldownKey) {
+    return db.prepare("SELECT last_sent_at FROM notification_cooldowns WHERE channel_id = ? AND cooldown_key = ?")
+      .get(positiveInteger(channelId, "通知渠道 ID"), requiredText(cooldownKey, "冷却键"))?.last_sent_at ?? null;
+  }
+
+  function setNotificationCooldown(channelId, cooldownKey, sentAt = clock()) {
+    db.prepare(`
+      INSERT INTO notification_cooldowns(channel_id, cooldown_key, last_sent_at) VALUES (?, ?, ?)
+      ON CONFLICT(channel_id, cooldown_key) DO UPDATE SET last_sent_at = excluded.last_sent_at
+    `).run(positiveInteger(channelId, "通知渠道 ID"), requiredText(cooldownKey, "冷却键"), iso(sentAt));
+    return iso(sentAt);
+  }
+
+  function getNotificationPolicy() {
+    const defaults = {
+      minRatioChangePercent: 0,
+      balanceCooldownHours: 24,
+      failureCooldownMinutes: 60,
+      retryAttempts: 3
+    };
+    const raw = db.prepare("SELECT value FROM settings WHERE key = 'notification_policy'").get()?.value;
+    if (!raw) return defaults;
+    try {
+      const stored = JSON.parse(raw);
+      const legacyCooldown = Number(stored.cooldownMinutes);
+      return {
+        minRatioChangePercent: stored.minRatioChangePercent ?? defaults.minRatioChangePercent,
+        balanceCooldownHours: stored.balanceCooldownHours
+          ?? (Number.isFinite(legacyCooldown) ? legacyCooldown / 60 : defaults.balanceCooldownHours),
+        failureCooldownMinutes: stored.failureCooldownMinutes
+          ?? (Number.isFinite(legacyCooldown) ? legacyCooldown : defaults.failureCooldownMinutes),
+        retryAttempts: stored.retryAttempts ?? defaults.retryAttempts
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function setNotificationPolicy(input) {
+    const current = getNotificationPolicy();
+    const legacyCooldown = input.cooldownMinutes === undefined ? null : Number(input.cooldownMinutes);
+    const minRatioChangePercent = Number(input.minRatioChangePercent ?? current.minRatioChangePercent);
+    const balanceCooldownHours = Number(input.balanceCooldownHours
+      ?? (legacyCooldown === null ? current.balanceCooldownHours : legacyCooldown / 60));
+    const failureCooldownMinutes = Number(input.failureCooldownMinutes
+      ?? (legacyCooldown === null ? current.failureCooldownMinutes : legacyCooldown));
+    const retryAttempts = Number(input.retryAttempts ?? current.retryAttempts);
+    if (!Number.isFinite(minRatioChangePercent) || minRatioChangePercent < 0) throw new Error("最小倍率变化百分比必须是非负有限数字");
+    if (!Number.isFinite(balanceCooldownHours) || balanceCooldownHours < 0) throw new Error("余额通知冷却小时必须是非负有限数字");
+    if (!Number.isFinite(failureCooldownMinutes) || failureCooldownMinutes < 0) throw new Error("失败通知冷却分钟必须是非负有限数字");
+    if (!Number.isInteger(retryAttempts) || retryAttempts < 1 || retryAttempts > 3) throw new Error("通知重试次数必须是 1 到 3 的整数");
+    const value = { minRatioChangePercent, balanceCooldownHours, failureCooldownMinutes, retryAttempts };
+    db.prepare("INSERT INTO settings(key, value) VALUES ('notification_policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(JSON.stringify(value));
+    return value;
+  }
+
+  function getDynamicRatioSettings() {
+    const defaults = dynamicRatioDefaults();
+    const raw = db.prepare("SELECT value FROM settings WHERE key = 'dynamic_ratio_settings'").get()?.value;
+    if (!raw) return defaults;
+    try {
+      const stored = JSON.parse(raw);
+      if (stored?.version === 2 && Array.isArray(stored.policies)) {
+        const byFamily = new Map(stored.policies.map((policy) => [policy?.family, policy]));
+        return {
+          version: 2,
+          policies: defaults.policies.map((fallback) => normalizeDynamicRatioPolicy(byFamily.get(fallback.family) ?? fallback, fallback))
+        };
+      }
+      return {
+        version: 2,
+        policies: [
+          normalizeDynamicRatioPolicy({ ...defaults.policies[0], ...stored, family: "gpt" }, defaults.policies[0]),
+          defaults.policies[1]
+        ]
+      };
+    } catch {
+      return defaults;
+    }
+  }
+
+  function setDynamicRatioSettings(input) {
+    if (input?.version !== 2 || !Array.isArray(input.policies)) throw new Error("动态倍率策略格式无效");
+    const defaults = dynamicRatioDefaults();
+    const byFamily = new Map();
+    for (const policy of input.policies) {
+      const family = normalizeModelFamily(policy?.family);
+      if (family === "other" || byFamily.has(family)) throw new Error("动态倍率模型族无效");
+      const fallback = defaults.policies.find((item) => item.family === family);
+      byFamily.set(family, normalizeDynamicRatioPolicy(policy, fallback));
+    }
+    if (!byFamily.has("gpt") || !byFamily.has("grok")) throw new Error("动态倍率策略必须包含 GPT 和 Grok");
+    const value = { version: 2, policies: [byFamily.get("gpt"), byFamily.get("grok")] };
+    db.prepare("INSERT INTO settings(key, value) VALUES ('dynamic_ratio_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(value));
+    return value;
   }
 
   function getExternalApiKeyHash() {
@@ -473,6 +792,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     if (!Array.isArray(result?.groups)) throw new Error("采集结果缺少 groups");
     let insertedVersions = 0;
     let changeCount = 0;
+    const changes = [];
     const seen = new Set();
     try {
       db.exec("BEGIN IMMEDIATE");
@@ -487,18 +807,18 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         `).get(siteId, groupId);
         if (current?.content_hash === hash) continue;
         if (hadBaseline) {
-          const changes = current
+          const rateChanges = current
             ? diffRates(rateFromRow(current), normalized)
             : [{ changeType: "group_added", oldValue: null, newValue: publicRateSnapshot(normalized) }];
-          for (const change of changes) {
-            insertChange({
+          for (const change of rateChanges) {
+            changes.push(insertChange({
               siteId,
               runId,
               groupId,
               groupName: normalized.groupName,
               createdAt: collectedAt,
               ...change
-            });
+            }));
             changeCount += 1;
           }
         }
@@ -543,7 +863,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         if (!seen.has(current.group_id)) {
           db.prepare("UPDATE rate_versions SET valid_to = ? WHERE id = ?").run(collectedAt, current.id);
           if (hadBaseline) {
-            insertChange({
+            changes.push(insertChange({
               siteId,
               runId,
               groupId: current.group_id,
@@ -552,7 +872,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
               oldValue: publicRateSnapshot(rateFromRow(current)),
               newValue: null,
               createdAt: collectedAt
-            });
+            }));
             changeCount += 1;
           }
         }
@@ -562,13 +882,42 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       const currentRateCount = Number.isInteger(Number(result.summary?.currentRateCount))
         ? Math.max(0, Number(result.summary.currentRateCount))
         : 0;
+      const familyCurrent = normalizeFamilyCurrentRates(result.summary);
+      const account = normalizeAccount(result.account, collectedAt);
       db.prepare(`
         UPDATE sites
-        SET current_rate_multiplier = ?, current_rate_ambiguous = ?, current_rate_count = ?, updated_at = ?
+        SET current_rate_multiplier = ?, current_rate_ambiguous = ?, current_rate_count = ?,
+          gpt_current_rate_multiplier = ?, gpt_current_rate_ambiguous = ?, gpt_current_rate_count = ?, gpt_current_rate_key_name = ?,
+          grok_current_rate_multiplier = ?, grok_current_rate_ambiguous = ?, grok_current_rate_count = ?, grok_current_rate_key_name = ?, grok_current_rate_group_name = ?,
+          balance_usd = CASE WHEN ? = 'known' THEN ? ELSE balance_usd END,
+          balance_updated_at = CASE WHEN ? = 'known' THEN ? ELSE balance_updated_at END,
+          balance_status = ?, balance_source = ?, balance_error = ?, updated_at = ?
         WHERE id = ?
-      `).run(currentRate, currentRateAmbiguous ? 1 : 0, currentRateCount, iso(clock()), siteId);
+      `).run(
+        currentRate,
+        currentRateAmbiguous ? 1 : 0,
+        currentRateCount,
+        familyCurrent.gpt.currentRateMultiplier,
+        familyCurrent.gpt.currentRateAmbiguous ? 1 : 0,
+        familyCurrent.gpt.currentRateCount,
+        familyCurrent.gpt.currentRateKeyName,
+        familyCurrent.grok.currentRateMultiplier,
+        familyCurrent.grok.currentRateAmbiguous ? 1 : 0,
+        familyCurrent.grok.currentRateCount,
+        familyCurrent.grok.currentRateKeyName,
+        familyCurrent.grok.currentRateGroupName,
+        account.status,
+        account.balanceUsd,
+        account.status,
+        account.fetchedAt,
+        account.status,
+        account.source,
+        account.error,
+        iso(clock()),
+        siteId
+      );
       db.exec("COMMIT");
-      return { insertedVersions, groupCount: result.groups.length, changeCount };
+      return { insertedVersions, groupCount: result.groups.length, changeCount, changes };
     } catch (error) {
       rollback();
       throw error;
@@ -584,7 +933,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       : input.changeType === "ratio_changed" && Number(input.newValue) > Number(input.oldValue)
         ? "warning"
         : "info";
-    db.prepare(`
+    const result = db.prepare(`
       INSERT INTO change_events(
         site_id, run_id, group_id, group_name, change_type, old_value, new_value,
         change_percent, severity, message, created_at
@@ -602,6 +951,11 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       changeMessage(input.changeType, input.groupName, input.oldValue, input.newValue),
       input.createdAt
     );
+    return mapChange(db.prepare(`
+      SELECT e.*, s.name AS site_name, s.base_url, c.name AS category_name
+      FROM change_events e JOIN sites s ON s.id = e.site_id
+      LEFT JOIN categories c ON c.id = s.category_id WHERE e.id = ?
+    `).get(Number(result.lastInsertRowid)));
   }
 
   function hideRateGroup(siteId, groupId) {
@@ -647,6 +1001,10 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     if (options.siteId) { where.push("s.id = ?"); params.push(Number(options.siteId)); }
     if (options.categoryId) { where.push("s.category_id = ?"); params.push(Number(options.categoryId)); }
     if (options.platform) { where.push("r.platform = ?"); params.push(options.platform); }
+    if (options.modelFamily) {
+      const family = normalizeModelFamily(options.modelFamily);
+      where.push(modelFamilySql("r")[family]);
+    }
     if (options.status) { where.push("r.status = ?"); params.push(options.status); }
     if (options.authStatus) { where.push("s.auth_status = ?"); params.push(options.authStatus); }
     if (options.tag) {
@@ -663,7 +1021,10 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     const items = db.prepare(`
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
         s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
-        s.current_rate_count, c.name AS category_name,
+        s.current_rate_count,
+        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name,
+        s.grok_current_rate_multiplier, s.grok_current_rate_ambiguous, s.grok_current_rate_count, s.grok_current_rate_key_name, s.grok_current_rate_group_name,
+        c.name AS category_name,
         EXISTS (
           SELECT 1 FROM hidden_rate_groups h
           WHERE h.site_id = r.site_id AND h.group_id = r.group_id
@@ -677,7 +1038,10 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     return db.prepare(`
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
         s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
-        s.current_rate_count, c.name AS category_name
+        s.current_rate_count,
+        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name,
+        s.grok_current_rate_multiplier, s.grok_current_rate_ambiguous, s.grok_current_rate_count, s.grok_current_rate_key_name, s.grok_current_rate_group_name,
+        c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id
       WHERE r.site_id = ? AND r.group_id = ? ORDER BY r.valid_from DESC LIMIT ?
     `).all(siteId, String(groupId), Math.min(1000, positiveInteger(limit, "历史数量"))).map(mapRate);
@@ -771,6 +1135,20 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     deleteSite,
     setGlobalSchedule,
     getGlobalSchedule,
+    createNotificationChannel,
+    updateNotificationChannel,
+    getNotificationChannel,
+    listNotificationChannels,
+    deleteNotificationChannel,
+    createNotificationLog,
+    listNotificationLogs,
+    getNotificationCooldown,
+    setNotificationCooldown,
+    getNotificationPolicy,
+    setNotificationPolicy,
+    getDynamicRatioSettings,
+    setDynamicRatioSettings,
+
     getExternalApiKeyHash,
     setExternalApiKeyHash,
     getEffectiveSchedule,
@@ -844,7 +1222,33 @@ function normalizeSiteInput(input) {
     scheduleMinutes: optionalPositiveInteger(input.scheduleMinutes, "采集频率"),
     enabled: input.enabled !== false,
     authMode: normalizeAuthMode(input.authMode ?? (providerId === "newapi" ? "public" : "edge-profile")),
-    rateConversionFactor: positiveFiniteNumber(input.rateConversionFactor ?? 1, "倍率换算系数")
+    rateConversionFactor: positiveFiniteNumber(input.rateConversionFactor ?? 1, "倍率换算系数"),
+    balanceThresholdUsd: optionalNonNegativeFiniteNumber(input.balanceThresholdUsd, "余额阈值")
+  };
+}
+
+function normalizeNotificationChannel(input) {
+  const subscriptions = normalizePositiveIntegerArray(input.subscriptions ?? [], "通知订阅");
+  const eventTypes = normalizeStringArray(input.eventTypes ?? [], "通知事件类型");
+  return {
+    name: requiredText(input.name, "通知渠道名称"),
+    type: requiredText(input.type, "通知渠道类型"),
+    enabled: input.enabled !== false,
+    subscriptions,
+    eventTypes
+  };
+}
+
+function normalizeAccount(account, fallbackTimestamp) {
+  const allowed = new Set(["known", "unavailable", "unknown"]);
+  const status = allowed.has(account?.status) ? account.status : "unknown";
+  const balanceUsd = status === "known" ? nullableFiniteNumber(account?.balanceUsd) : null;
+  return {
+    status: status === "known" && balanceUsd === null ? "unavailable" : status,
+    balanceUsd,
+    source: String(account?.source ?? "").slice(0, 100),
+    error: String(account?.error ?? "").slice(0, 300),
+    fetchedAt: account?.fetchedAt || fallbackTimestamp
   };
 }
 
@@ -905,6 +1309,12 @@ function mapSite(row) {
       : convertRate(sourceCurrentRateMultiplier, rateConversionFactor),
     currentRateAmbiguous: Boolean(row.current_rate_ambiguous),
     currentRateCount: Number(row.current_rate_count ?? 0),
+    balanceUsd: nullableFiniteNumber(row.balance_usd),
+    balanceStatus: row.balance_status ?? "unknown",
+    balanceSource: row.balance_source ?? "",
+    balanceUpdatedAt: row.balance_updated_at ?? null,
+    balanceError: row.balance_error ?? "",
+    balanceThresholdUsd: nullableFiniteNumber(row.balance_threshold_usd),
     enabled: Boolean(row.enabled),
     authStatus: row.auth_status,
     authMode: row.auth_mode,
@@ -918,6 +1328,35 @@ function mapSite(row) {
     tags: row.tag_names ? row.tag_names.split(String.fromCharCode(31)).filter(Boolean).sort() : [],
     createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapNotificationChannel(row) {
+  return {
+    id: Number(row.id),
+    name: row.name,
+    type: row.type,
+    enabled: Boolean(row.enabled),
+    subscriptions: parseJsonArray(row.subscriptions),
+    eventTypes: parseJsonArray(row.event_types),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapNotificationLog(row) {
+  return {
+    id: Number(row.id),
+    channelId: row.channel_id === null ? null : Number(row.channel_id),
+    channelName: row.channel_name,
+    channelType: row.channel_type,
+    eventType: row.event_type,
+    status: row.status,
+    message: row.message,
+    errorCode: row.error_code,
+    errorMessage: row.error_message,
+    attempts: Number(row.attempts),
+    createdAt: row.created_at
   };
 }
 
@@ -936,10 +1375,139 @@ function mapRun(row) {
   };
 }
 
+function dynamicRatioDefaults() {
+  return {
+    version: 2,
+    policies: [
+      { family: "gpt", enabled: false, group: "default", serviceMultiplier: 1.2, minimum: 0.01, maximum: 10, changeThreshold: 0.05 },
+      { family: "grok", enabled: false, group: "grok", serviceMultiplier: 1, minimum: 0.001, maximum: 10, changeThreshold: 0.001 }
+    ]
+  };
+}
+
+function normalizeDynamicRatioPolicy(input, fallback) {
+  const family = normalizeModelFamily(input?.family ?? fallback.family);
+  if (family === "other") throw new Error("动态倍率模型族无效");
+  const group = requiredText(input?.group ?? fallback.group, "目标分组");
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(group)) throw new Error("目标分组格式无效");
+  const serviceMultiplier = positiveFiniteNumber(input?.serviceMultiplier ?? fallback.serviceMultiplier, "服务倍率");
+  const minimum = positiveFiniteNumber(input?.minimum ?? fallback.minimum, "倍率下限");
+  const maximum = positiveFiniteNumber(input?.maximum ?? fallback.maximum, "倍率上限");
+  const changeThreshold = finiteNumber(input?.changeThreshold ?? fallback.changeThreshold, "变化阈值");
+  if (changeThreshold < 0 || changeThreshold > 1) throw new Error("变化阈值必须在 0 到 1 之间");
+  if (minimum > maximum) throw new Error("倍率上下限无效");
+  return { family, enabled: Boolean(input?.enabled), group, serviceMultiplier, minimum, maximum, changeThreshold };
+}
+
+function normalizeModelFamily(value) {
+  const family = String(value ?? "").toLowerCase();
+  if (!MODEL_FAMILIES.has(family)) throw new Error("模型族无效");
+  return family;
+}
+
+function classifyModelFamily(input) {
+  const platform = String(input.platform ?? "").toLowerCase();
+  const text = `${input.groupId ?? input.group_id ?? ""} ${input.groupName ?? input.group_name ?? ""}`.toLowerCase();
+  if (platform === "video" || /(?:视频|video)/i.test(text)) return "other";
+  if (["grok", "xai", "x.ai"].includes(platform) || /grok|gork|x\.ai|\bxai\b/i.test(text)) return "grok";
+  if (["openai", "newapi"].includes(platform) || /gpt|openai/i.test(text)) return "gpt";
+  return "other";
+}
+
+function normalizeFamilyCurrentRates(summary = {}) {
+  const byFamily = summary?.currentRatesByFamily ?? {};
+  const legacy = {
+    currentRateMultiplier: nullableFiniteNumber(summary?.currentRateMultiplier),
+    currentRateAmbiguous: Boolean(summary?.currentRateAmbiguous),
+    currentRateCount: Number.isInteger(Number(summary?.currentRateCount))
+      ? Math.max(0, Number(summary.currentRateCount))
+      : 0,
+    currentRateKeyName: summary?.currentRateKeyName ? String(summary.currentRateKeyName) : "",
+    currentRateGroupName: summary?.currentRateGroupName ? String(summary.currentRateGroupName) : ""
+  };
+  const gpt = byFamily.gpt ?? {};
+  const grok = byFamily.grok ?? {};
+  return {
+    gpt: {
+      currentRateMultiplier: nullableFiniteNumber(gpt.currentRateMultiplier ?? legacy.currentRateMultiplier),
+      currentRateAmbiguous: Boolean(gpt.currentRateAmbiguous ?? (byFamily.gpt ? false : legacy.currentRateAmbiguous)),
+      currentRateCount: Number.isInteger(Number(gpt.currentRateCount))
+        ? Math.max(0, Number(gpt.currentRateCount))
+        : (byFamily.gpt ? 0 : legacy.currentRateCount),
+      currentRateKeyName: String(gpt.currentRateKeyName ?? legacy.currentRateKeyName ?? "").trim()
+    },
+    grok: {
+      currentRateMultiplier: nullableFiniteNumber(grok.currentRateMultiplier),
+      currentRateAmbiguous: Boolean(grok.currentRateAmbiguous),
+      currentRateCount: Number.isInteger(Number(grok.currentRateCount))
+        ? Math.max(0, Number(grok.currentRateCount))
+        : 0,
+      currentRateKeyName: (() => {
+        const named = String(grok.currentRateKeyName ?? "").trim();
+        if (named) return named;
+        return nullableFiniteNumber(grok.currentRateMultiplier) === null ? "" : "grok";
+      })(),
+      currentRateGroupName: String(grok.currentRateGroupName ?? "").trim()
+    }
+  };
+}
+
+function resolveFamilyCurrentRate(row, modelFamily) {
+  if (modelFamily === "grok") {
+    const source = nullableFiniteNumber(row.grok_current_rate_multiplier);
+    if (source !== null || Number(row.grok_current_rate_count ?? 0) > 0 || Boolean(row.grok_current_rate_ambiguous)) {
+      return {
+        sourceCurrentRateMultiplier: source,
+        currentRateAmbiguous: Boolean(row.grok_current_rate_ambiguous),
+        currentRateCount: Number(row.grok_current_rate_count ?? 0),
+        currentRateKeyName: String(row.grok_current_rate_key_name || "grok") || "grok",
+        currentRateGroupName: String(row.grok_current_rate_group_name || "") || null
+      };
+    }
+    return {
+      sourceCurrentRateMultiplier: null,
+      currentRateAmbiguous: false,
+      currentRateCount: 0,
+      currentRateKeyName: null,
+      currentRateGroupName: null
+    };
+  }
+
+  // GPT and other families use the GPT pricing identity (key 1111), falling back to legacy site current rate.
+  const gptSource = nullableFiniteNumber(row.gpt_current_rate_multiplier);
+  if (gptSource !== null || Number(row.gpt_current_rate_count ?? 0) > 0 || Boolean(row.gpt_current_rate_ambiguous)) {
+    return {
+      sourceCurrentRateMultiplier: gptSource,
+      currentRateAmbiguous: Boolean(row.gpt_current_rate_ambiguous),
+      currentRateCount: Number(row.gpt_current_rate_count ?? 0),
+      currentRateKeyName: String(row.gpt_current_rate_key_name || "1111") || "1111",
+      currentRateGroupName: null
+    };
+  }
+  return {
+    sourceCurrentRateMultiplier: nullableFiniteNumber(row.current_rate_multiplier),
+    currentRateAmbiguous: Boolean(row.current_rate_ambiguous),
+    currentRateCount: Number(row.current_rate_count ?? 0),
+    currentRateKeyName: null,
+    currentRateGroupName: null
+  };
+}
+
+function modelFamilySql(alias = "r") {
+  const platform = `lower(coalesce(${alias}.platform, ''))`;
+  const text = `lower(coalesce(${alias}.group_id, '') || ' ' || coalesce(${alias}.group_name, ''))`;
+  const video = `(${platform} = 'video' OR ${text} LIKE '%video%' OR ${text} LIKE '%视频%')`;
+  const grok = `(NOT ${video} AND (${platform} IN ('grok','xai','x.ai') OR ${text} LIKE '%grok%' OR ${text} LIKE '%gork%' OR ${text} LIKE '%x.ai%' OR ${text} LIKE '%xai%'))`;
+  const gpt = `(NOT ${grok} AND (${platform} IN ('openai','newapi') OR ${text} LIKE '%gpt%' OR ${text} LIKE '%openai%'))`;
+  return { gpt, grok, other: `(NOT ${grok} AND NOT ${gpt})` };
+}
+
 function mapRate(row) {
   const sourceEffectiveRateMultiplier = Number(row.effective_rate_multiplier);
   const rateConversionFactor = Number(row.rate_conversion_factor ?? 1);
-  const sourceSiteCurrentRateMultiplier = nullableFiniteNumber(row.current_rate_multiplier);
+  const modelFamily = classifyModelFamily(row);
+  const familyCurrent = resolveFamilyCurrentRate(row, modelFamily);
+  const sourceSiteCurrentRateMultiplier = familyCurrent.sourceCurrentRateMultiplier;
   return {
     id: Number(row.id),
     siteId: Number(row.site_id),
@@ -950,6 +1518,7 @@ function mapRate(row) {
     groupId: row.group_id,
     groupName: row.group_name,
     platform: row.platform,
+    modelFamily,
     status: row.status,
     subscriptionType: row.subscription_type,
     billingType: row.billing_type,
@@ -962,8 +1531,10 @@ function mapRate(row) {
     siteCurrentRateMultiplier: sourceSiteCurrentRateMultiplier === null
       ? null
       : convertRate(sourceSiteCurrentRateMultiplier, rateConversionFactor),
-    siteCurrentRateAmbiguous: Boolean(row.current_rate_ambiguous),
-    siteCurrentRateCount: Number(row.current_rate_count ?? 0),
+    siteCurrentRateAmbiguous: familyCurrent.currentRateAmbiguous,
+    siteCurrentRateCount: familyCurrent.currentRateCount,
+    siteCurrentRateKeyName: familyCurrent.currentRateKeyName,
+    siteCurrentRateGroupName: familyCurrent.currentRateGroupName,
     peakEnabled: Boolean(row.peak_enabled),
     peakStart: row.peak_start,
     peakEnd: row.peak_end,
@@ -1144,6 +1715,32 @@ function optionalPositiveInteger(value, label) {
   return positiveInteger(value, label);
 }
 
+function optionalNonNegativeFiniteNumber(value, label) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = finiteNumber(value, label);
+  if (number < 0) throw new Error(`${label}必须是非负有限数字`);
+  return number;
+}
+
+function normalizePositiveIntegerArray(value, label) {
+  if (!Array.isArray(value)) throw new Error(`${label}必须是数组`);
+  return [...new Set(value.map((item) => positiveInteger(item, label)))];
+}
+
+function normalizeStringArray(value, label) {
+  if (!Array.isArray(value)) throw new Error(`${label}必须是数组`);
+  return [...new Set(value.map((item) => requiredText(item, label)))];
+}
+
+function parseJsonArray(value) {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function positiveInteger(value, label) {
   const number = Number(value);
   if (!Number.isInteger(number) || number <= 0) throw new Error(`${label}必须是正整数`);
@@ -1155,6 +1752,7 @@ function finiteNumber(value, label) {
   if (!Number.isFinite(number)) throw new Error(`${label}必须是有限数字`);
   return number;
 }
+
 
 function positiveFiniteNumber(value, label) {
   const number = finiteNumber(value, label);

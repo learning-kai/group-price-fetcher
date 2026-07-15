@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>分组倍率控制台</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="./styles.css">
   </head>
   <body>
     <div class="app-shell">
@@ -19,7 +19,8 @@
           <button class="nav-item active" type="button" data-view="rates" aria-current="page"><span>01</span>最新倍率</button>
           <button class="nav-item" type="button" data-view="changes"><span>02</span>最近变化</button>
           <button class="nav-item" type="button" data-view="sites"><span>03</span>站点管理</button>
-          <button class="nav-item" type="button" data-view="settings"><span>04</span>采集设置</button>
+          <button class="nav-item" type="button" data-view="notifications"><span>04</span>通知中心</button>
+          <button class="nav-item" type="button" data-view="settings"><span>05</span>采集设置</button>
         </nav>
 
         <div class="rail-status">
@@ -47,6 +48,7 @@
             <label><span>分类</span><select id="category-filter"><option value="">全部分类</option></select></label>
             <label><span>标签</span><select id="tag-filter"><option value="">全部标签</option></select></label>
             <label><span>平台</span><select id="platform-filter"><option value="">全部平台</option></select></label>
+            <label><span>模型族</span><select id="model-family-filter"><option value="">全部模型族</option><option value="gpt">GPT</option><option value="grok">Grok</option><option value="other">其他</option></select></label>
             <label><span>分组状态</span><select id="group-status-filter"><option value="">全部状态</option><option value="active">active</option><option value="inactive">inactive</option></select></label>
             <label><span>认证</span><select id="auth-filter"><option value="">全部状态</option><option value="valid">有效</option><option value="login_required">需要登录</option><option value="unknown">未验证</option></select></label>
             <label><span>显示</span><select id="rate-visibility"><option value="visible">正常显示</option><option value="hidden">已隐藏</option></select></label>
@@ -54,10 +56,12 @@
             <label><span>方向</span><select id="sort-direction"><option value="asc">升序</option><option value="desc">降序</option></select></label>
           </form>
 
-          <div id="rate-summary" class="metric-strip" aria-live="polite">
+          <div id="rate-summary" class="metric-strip family-metrics" aria-live="polite">
             <div><span>当前分组</span><strong id="metric-groups">0</strong></div>
             <div><span>覆盖站点</span><strong id="metric-sites">0</strong></div>
-            <div><span>最低倍率</span><strong id="metric-min">—</strong></div>
+            <div><span>筛选最低</span><strong id="metric-min">—</strong></div>
+            <div><span>GPT 最低</span><strong id="metric-gpt-min">—</strong></div>
+            <div><span>Grok 最低</span><strong id="metric-grok-min">—</strong></div>
             <div><span>需登录</span><strong id="metric-auth">0</strong></div>
           </div>
 
@@ -73,6 +77,13 @@
         </section>
 
         <section id="view-changes" class="view" data-view-panel="changes" hidden>
+          <div id="changes-summary" class="compact-summary" aria-live="polite">
+            <span>合计 <strong id="changes-total-count">0</strong></span>
+            <span class="trend-up">上调 <strong id="changes-up-count">0</strong></span>
+            <span class="trend-down">下调 <strong id="changes-down-count">0</strong></span>
+            <span>新增 <strong id="changes-added-count">0</strong></span>
+            <span>删除 <strong id="changes-removed-count">0</strong></span>
+          </div>
           <div class="section-tools">
             <label><span>变化类型</span><select id="change-type-filter"><option value="">全部变化</option><option value="ratio_changed">倍率变化</option><option value="group_added">新增分组</option><option value="group_removed">删除分组</option><option value="desc_changed">说明变化</option></select></label>
             <span id="change-site-label" class="muted" hidden></span>
@@ -93,14 +104,62 @@
             <label class="search-field"><span>搜索站点</span><input id="site-search" type="search" placeholder="名称或 URL"></label>
             <label><span>认证状态</span><select id="site-auth-filter"><option value="">全部</option><option value="valid">有效</option><option value="login_required">需要登录</option><option value="unknown">未验证</option></select></label>
           </div>
+          <div id="site-balance-kpis" class="metric-strip" aria-live="polite">
+            <div><span>余额已知</span><strong id="balance-known-count">0</strong></div>
+            <div><span>余额合计</span><strong id="balance-total-value">—</strong></div>
+            <div><span>低余额</span><strong id="balance-low-count">0</strong></div>
+            <div><span>余额异常</span><strong id="balance-issue-count">0</strong></div>
+          </div>
           <section class="data-surface">
             <div class="table-scroll">
               <table class="site-table">
-                <thead><tr><th>站点</th><th>分类 / 标签</th><th>认证</th><th>采集频率</th><th>下次运行</th><th>最近采集</th><th class="actions-col">操作</th></tr></thead>
-                <tbody id="sites-body"><tr class="empty"><td colspan="7">正在加载站点</td></tr></tbody>
+                <thead><tr><th>站点</th><th>分类 / 标签</th><th>认证</th><th>余额</th><th>采集频率</th><th>下次运行</th><th>最近采集</th><th class="actions-col">操作</th></tr></thead>
+                <tbody id="sites-body"><tr class="empty"><td colspan="8">正在加载站点</td></tr></tbody>
               </table>
             </div>
           </section>
+        </section>
+
+        <section id="view-notifications" class="view" data-view-panel="notifications" hidden>
+          <div id="notification-kpis" class="metric-strip" aria-live="polite">
+            <div><span>启用渠道</span><strong id="notification-enabled-count">0</strong></div>
+            <div><span>发送成功</span><strong id="notification-success-count">0</strong></div>
+            <div><span>发送失败</span><strong id="notification-failed-count">0</strong></div>
+            <div><span>低余额站点</span><strong id="notification-low-balance-count">0</strong></div>
+          </div>
+          <div class="notification-heading">
+            <div><h2>通知渠道</h2><p class="muted">管理发送目标和订阅范围</p></div>
+            <button id="add-notification-channel" class="primary-command" type="button">＋ 添加渠道</button>
+          </div>
+          <section class="data-surface" aria-label="通知渠道">
+            <div class="table-scroll">
+              <table class="notification-table">
+                <thead><tr><th>名称</th><th>类型</th><th>状态</th><th>订阅站点</th><th>订阅事件</th><th>更新时间</th><th>操作</th></tr></thead>
+                <tbody id="notification-channels-body"><tr class="empty"><td colspan="7">正在加载通知渠道</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <div class="notification-grid">
+            <section class="settings-block">
+              <header><div><p>DELIVERY POLICY</p><h2>通知策略</h2></div></header>
+              <form id="notification-policy-form" class="policy-grid">
+                <label><span>最小倍率变化百分比</span><input id="policy-min-ratio-change" type="number" min="0" step="0.01" required></label>
+                <label><span>余额冷却小时</span><input id="policy-balance-cooldown" type="number" min="0" step="0.1" required></label>
+                <label><span>失败冷却分钟</span><input id="policy-failure-cooldown" type="number" min="0" step="1" required></label>
+                <label><span>重试次数</span><input id="policy-retry-attempts" type="number" min="1" max="3" step="1" required></label>
+                <button class="primary-command" type="submit">保存策略</button>
+              </form>
+            </section>
+            <section class="data-surface notification-log-surface" aria-label="通知日志">
+              <header class="surface-header"><div><p>DELIVERY LOG</p><h2>最近发送</h2></div></header>
+              <div class="table-scroll">
+                <table class="notification-log-table">
+                  <thead><tr><th>时间</th><th>渠道</th><th>事件</th><th>状态</th><th>尝试</th><th>错误</th></tr></thead>
+                  <tbody id="notification-logs-body"><tr class="empty"><td colspan="6">正在加载通知日志</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
         </section>
 
         <section id="view-settings" class="view settings-layout" data-view-panel="settings" hidden>
@@ -109,6 +168,32 @@
             <form id="schedule-form" class="inline-form">
               <label><span>分钟</span><input id="global-schedule" type="number" min="1" required></label>
               <button class="primary-command" type="submit">保存</button>
+            </form>
+          </section>
+          <section class="settings-block">
+            <header><div><p>MODEL-FAMILY BILLING</p><h2>GPT / Grok 独立倍率同步</h2></div></header>
+            <form id="dynamic-ratio-form" class="family-policy-grid">
+              <fieldset class="family-policy-card">
+                <legend>GPT 计价域</legend>
+                <label class="toggle-row"><input id="dynamic-gpt-enabled" type="checkbox"><span>启用 GPT 自动同步</span></label>
+                <label><span>目标分组</span><input id="dynamic-gpt-group" value="default" required></label>
+                <label><span>平台服务倍率</span><input id="dynamic-gpt-service-multiplier" type="number" min="0.000001" step="any" value="1" required></label>
+                <label><span>倍率下限</span><input id="dynamic-gpt-minimum" type="number" min="0.000001" step="any" value="0.001" required></label>
+                <label><span>倍率上限</span><input id="dynamic-gpt-maximum" type="number" min="0.000001" step="any" value="10" required></label>
+                <label><span>变化阈值（0–1）</span><input id="dynamic-gpt-threshold" type="number" min="0" max="1" step="0.001" value="0.001" required></label>
+                <p id="dynamic-gpt-status" class="muted" aria-live="polite">尚未读取 GPT 同步设置</p>
+              </fieldset>
+              <fieldset class="family-policy-card">
+                <legend>Grok 计价域</legend>
+                <label class="toggle-row"><input id="dynamic-grok-enabled" type="checkbox"><span>启用 Grok 自动同步</span></label>
+                <label><span>目标分组</span><input id="dynamic-grok-group" value="grok" required></label>
+                <label><span>平台服务倍率</span><input id="dynamic-grok-service-multiplier" type="number" min="0.000001" step="any" value="1" required></label>
+                <label><span>倍率下限</span><input id="dynamic-grok-minimum" type="number" min="0.000001" step="any" value="0.001" required></label>
+                <label><span>倍率上限</span><input id="dynamic-grok-maximum" type="number" min="0.000001" step="any" value="10" required></label>
+                <label><span>变化阈值（0–1）</span><input id="dynamic-grok-threshold" type="number" min="0" max="1" step="0.001" value="0.001" required></label>
+                <p id="dynamic-grok-status" class="muted" aria-live="polite">Grok 渠道分组待配置；当前不会写入生产倍率</p>
+              </fieldset>
+              <button class="primary-command" type="submit">保存两套策略</button>
             </form>
           </section>
           <section class="settings-block">
@@ -170,6 +255,7 @@
           <label><span>分类</span><select id="site-category"><option value="">未分类</option></select></label>
           <label><span>采集频率（分钟）</span><input id="site-schedule" type="number" min="1" placeholder="继承分类"></label>
           <label><span>倍率换算系数</span><input id="site-rate-conversion-factor" type="number" min="0.000001" step="any" value="1" required></label>
+          <label><span>低余额阈值（USD）</span><input id="site-balance-threshold" type="number" min="0" step="0.01" placeholder="不提醒"></label>
         </div>
         <div id="sub2api-credentials" class="form-grid credential-fields" hidden>
           <label><span>登录邮箱</span><input id="credential-email" type="email" autocomplete="username"></label>
@@ -191,6 +277,55 @@
       </form>
     </dialog>
 
+    <dialog id="notification-dialog" aria-labelledby="notification-dialog-title">
+      <form id="notification-form" class="dialog-form wide-dialog">
+        <header><div><p>DESTINATION</p><h2 id="notification-dialog-title">添加通知渠道</h2></div><button class="dialog-close" type="button" data-close="notification-dialog" aria-label="关闭">×</button></header>
+        <input id="notification-id" type="hidden">
+        <div class="form-grid">
+          <label><span>渠道名称</span><input id="notification-name" required></label>
+          <label><span>渠道类型</span><select id="notification-type" required><option value="telegram">Telegram</option><option value="webhook">Webhook</option><option value="email">Email</option><option value="wecom">企业微信</option><option value="dingtalk">钉钉</option><option value="feishu">飞书</option></select></label>
+        </div>
+        <div id="notification-config-fields">
+          <div data-notification-config="telegram" class="form-grid">
+            <label><span>Bot Token</span><input id="notification-bot-token" type="password" autocomplete="new-password"></label>
+            <label><span>Chat ID</span><input id="notification-chat-id"></label>
+          </div>
+          <div data-notification-config="webhook" hidden>
+            <div class="form-grid"><label><span>Webhook URL</span><input id="notification-webhook-url" type="url"></label><label><span>请求方法</span><select id="notification-webhook-method"><option value="POST">POST</option><option value="PUT">PUT</option></select></label></div>
+            <label><span>自定义 Headers（JSON）</span><textarea id="notification-webhook-headers" rows="4" spellcheck="false" placeholder='{"Authorization":"Bearer ..."}'></textarea></label>
+          </div>
+          <div data-notification-config="email" class="form-grid" hidden>
+            <label><span>SMTP 主机</span><input id="notification-smtp-host"></label>
+            <label><span>SMTP 端口</span><input id="notification-smtp-port" type="number" min="1" max="65535" value="587"></label>
+            <label><span>SMTP 用户名</span><input id="notification-smtp-username" autocomplete="username"></label>
+            <label><span>SMTP 密码</span><input id="notification-smtp-password" type="password" autocomplete="new-password"></label>
+            <label><span>发件人</span><input id="notification-email-from" type="email"></label>
+            <label><span>收件人（逗号分隔）</span><input id="notification-email-recipients"></label>
+            <label class="toggle-row"><input id="notification-smtp-secure" type="checkbox"><span>使用 SMTPS</span></label>
+            <label class="toggle-row"><input id="notification-smtp-tls" type="checkbox" checked><span>使用 STARTTLS</span></label>
+          </div>
+          <div data-notification-config="platform" class="form-grid" hidden>
+            <label><span>Webhook URL</span><input id="notification-platform-webhook-url" type="url"></label>
+            <label id="notification-secret-field"><span>签名密钥（可选）</span><input id="notification-signing-secret" type="password" autocomplete="new-password"></label>
+          </div>
+        </div>
+        <p id="notification-config-state" class="muted" aria-live="polite"></p>
+        <div class="subscription-grid">
+          <label><span>订阅站点</span><select id="notification-sites" multiple size="5"></select><small>未选择站点时订阅全部站点</small></label>
+          <fieldset id="notification-events"><legend>订阅事件</legend><div class="event-options">
+            <label><input type="checkbox" value="ratio_changed"><span>倍率变化</span></label>
+            <label><input type="checkbox" value="group_added"><span>新增分组</span></label>
+            <label><input type="checkbox" value="group_removed"><span>删除分组</span></label>
+            <label><input type="checkbox" value="balance_low"><span>余额过低</span></label>
+            <label><input type="checkbox" value="auth_failed"><span>认证失败</span></label>
+            <label><input type="checkbox" value="collection_failed"><span>采集失败</span></label>
+          </div></fieldset>
+        </div>
+        <label class="toggle-row"><input id="notification-enabled" type="checkbox" checked><span>启用渠道</span></label>
+        <footer><button class="secondary-command" type="button" data-close="notification-dialog">取消</button><button class="primary-command" type="submit">保存渠道</button></footer>
+      </form>
+    </dialog>
+
     <dialog id="bulk-dialog">
       <form id="bulk-form" class="dialog-form wide-dialog">
         <header><div><p>BULK</p><h2>批量添加站点</h2></div><button class="dialog-close" type="button" data-close="bulk-dialog" aria-label="关闭">×</button></header>
@@ -207,6 +342,6 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <script type="module" src="/app.js"></script>
+    <script type="module" src="./app.js"></script>
   </body>
 </html>

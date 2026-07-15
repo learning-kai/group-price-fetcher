@@ -42,18 +42,71 @@ export async function fetchPrices(options, client = requestNewApi) {
   }
 
   const groups = normalizeNewApiGroups(payload.data);
+  let keys = null;
+  let currentRates = [];
+  if (authenticated) {
+    const tokenPayload = await safeRequestPayload(client, {
+      baseUrl,
+      path: "/api/token/?p=1&size=100",
+      headers
+    });
+    keys = normalizeNewApiTokens(tokenPayload?.data);
+    currentRates = deriveNewApiCurrentRates(keys, groups);
+  }
+  const fetchedAt = new Date().toISOString();
+  const account = authenticated
+    ? await collectNewApiAccount({ baseUrl, headers, fetchedAt, client })
+    : { status: "unknown", balanceUsd: null, source: "newapi:user-self", error: "", fetchedAt };
   return {
     providerId: newApiProvider.id,
     providerLabel: newApiProvider.label,
     baseUrl,
     mode: authenticated ? "authenticated" : "public",
-    fetchedAt: new Date().toISOString(),
+    fetchedAt,
     groups,
-    keys: null,
-    currentRates: [],
+    keys,
+    currentRates,
+    account,
     userOverrides: [],
-    summary: summarizeGroups(groups, [])
+    summary: summarizeGroups(groups, currentRates, keys ?? [])
   };
+}
+
+async function collectNewApiAccount({ baseUrl, headers, fetchedAt, client }) {
+  try {
+    const [userPayload, statusPayload] = await Promise.all([
+      requestPayload(client, { baseUrl, path: "/api/user/self", headers }),
+      requestPayload(client, { baseUrl, path: "/api/status", headers: {} })
+    ]);
+    const quota = Number(userPayload.data?.quota);
+    const quotaPerUnit = Number(statusPayload.data?.quota_per_unit);
+    if (!Number.isFinite(quota) || !Number.isFinite(quotaPerUnit) || quotaPerUnit <= 0) {
+      throw new Error("余额或额度单位字段无效");
+    }
+    return {
+      status: "known",
+      balanceUsd: quota / quotaPerUnit,
+      source: "newapi:user-self",
+      error: "",
+      fetchedAt
+    };
+  } catch (error) {
+    return {
+      status: "unavailable",
+      balanceUsd: null,
+      source: "newapi:user-self",
+      error: String(error?.message || "余额接口不可用").slice(0, 200),
+      fetchedAt
+    };
+  }
+}
+
+async function safeRequestPayload(client, request) {
+  try {
+    return await requestPayload(client, request);
+  } catch {
+    return null;
+  }
 }
 
 async function requestPayload(client, request) {
@@ -97,6 +150,45 @@ async function requestNewApi({ baseUrl, path, headers = {}, fetchImpl = globalTh
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function normalizeNewApiTokens(data) {
+  const items = Array.isArray(data) ? data : data?.items;
+  if (!Array.isArray(items)) return null;
+  const active = items.filter((token) => Number(token?.status) === 1);
+  const preferred = active.filter((token) => {
+    const name = String(token?.name ?? "").trim();
+    return name === "1111" || name === "grok";
+  });
+  return (preferred.length ? preferred : active).map((token) => ({
+    id: token.id,
+    name: String(token.name ?? ""),
+    groupId: String(token.group ?? "default"),
+    status: Number(token.status),
+    isActive: true
+  }));
+}
+
+function deriveNewApiCurrentRates(keys, groups) {
+  if (!Array.isArray(keys) || keys.length === 0) return [];
+  const groupsById = new Map(groups.map((group) => [String(group.groupId), group]));
+  return keys.flatMap((key) => {
+    const group = groupsById.get(String(key.groupId));
+    if (!group) return [];
+    return [{
+      keyId: key.id,
+      keyName: key.name,
+      keyStatus: "active",
+      isActive: true,
+      groupId: key.groupId,
+      groupName: group.groupName,
+      platform: group.platform,
+      baseRateMultiplier: group.baseRateMultiplier,
+      userRateMultiplier: null,
+      currentRateMultiplier: group.effectiveRateMultiplier,
+      source: "api/token.group"
+    }];
+  });
 }
 
 function normalizeNewApiGroups(data) {

@@ -23,7 +23,7 @@ test("sub2api provider combines available groups with user rates", async () => {
   });
 
   assert.equal(sub2apiProvider.id, "sub2api");
-  assert.deepEqual(calls.map((call) => call.path), ["/groups/available", "/groups/rates", "/keys"]);
+  assert.deepEqual(calls.map((call) => call.path), ["/groups/available", "/groups/rates", "/keys", "/auth/me"]);
   assert.equal(result.providerId, "sub2api");
   assert.equal(result.groups[0].baseRateMultiplier, 0.3);
   assert.equal(result.groups[0].userRateMultiplier, 0.18);
@@ -53,6 +53,23 @@ test("sub2api provider prefers the active API key named 1111 when account keys h
   assert.equal(result.summary.currentRateAmbiguous, false);
   assert.equal(result.summary.currentRateCount, 1);
   assert.equal(result.summary.currentRateKeyName, "1111");
+});
+
+test("sub2api provider captures authenticated account balance without failing rate collection", async () => {
+  const result = await fetchPrices({ baseUrl: "https://sub2.example.com", token: "access-token" }, async ({ path }) => {
+    if (path === "/groups/available") return [{ id: 1, name: "默认", rate_multiplier: 0.1 }];
+    if (path === "/groups/rates") return {};
+    if (path === "/keys") return { items: [] };
+    if (path === "/auth/me") return { balance: 12.345678 };
+    throw new Error(`unexpected path: ${path}`);
+  });
+  assert.deepEqual(result.account, {
+    status: "known",
+    balanceUsd: 12.345678,
+    source: "sub2api:auth/me",
+    error: "",
+    fetchedAt: result.fetchedAt
+  });
 });
 
 test("sub2api provider reports the logged-in account current selected rate", async () => {

@@ -12,7 +12,7 @@ export class RouteError extends Error {
   }
 }
 
-export function createApiRouter({ repository, collector, authManager, scheduler, exportService, siteTransferService, browserAuthSupported = false, apiAuth = null }) {
+export function createApiRouter({ repository, collector, authManager, scheduler, exportService, siteTransferService, notificationService, browserAuthSupported = false, apiAuth = null }) {
   const externalAuth = apiAuth ?? createExternalApiAuth({
     getHash: () => repository.getExternalApiKeyHash(),
     setHash: (hash) => repository.setExternalApiKeyHash(hash)
@@ -72,6 +72,11 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
         return ok({ globalScheduleMinutes: repository.setGlobalSchedule(body.minutes) });
       }
     }
+    if (pathname === "/api/settings/dynamic-ratio") {
+      if (method === "GET") return ok(repository.getDynamicRatioSettings());
+      if (method === "PUT") return ok(repository.setDynamicRatioSettings(body));
+    }
+
     if (pathname === "/api/settings/api-key") {
       if (method === "GET") return ok({ configured: externalAuth.isConfigured() });
       if (method === "POST") return created({ apiKey: externalAuth.rotateKey() });
@@ -79,6 +84,35 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
         externalAuth.clearKey();
         return { status: 204, body: null };
       }
+    }
+    if (pathname === "/api/notifications/channels") {
+      if (method === "GET") return ok({ items: await notificationService.listChannels() });
+      if (method === "POST") return created(await notificationService.createChannel(body));
+    }
+    if (parts[0] === "api" && parts[1] === "notifications" && parts[2] === "channels" && parts.length >= 4) {
+      const id = parseId(parts[3]);
+      if (parts.length === 4) {
+        if (method === "PATCH") return ok(await notificationService.updateChannel(id, body));
+        if (method === "DELETE") {
+          if (!await notificationService.deleteChannel(id)) throw new RouteError("通知渠道不存在", 404);
+          return { status: 204, body: null };
+        }
+      }
+      if (parts.length === 5 && parts[4] === "test" && method === "POST") {
+        return ok(await notificationService.testChannel(id));
+      }
+    }
+    if (pathname === "/api/notifications/logs" && method === "GET") {
+      return ok(await notificationService.listLogs({
+        page: numberParam(url.searchParams, "page", 1),
+        pageSize: numberParam(url.searchParams, "pageSize", 50),
+        channelId: url.searchParams.get("channelId") || undefined,
+        status: url.searchParams.get("status") || ""
+      }));
+    }
+    if (pathname === "/api/notifications/policy") {
+      if (method === "GET") return ok(repository.getNotificationPolicy());
+      if (method === "PUT") return ok(repository.setNotificationPolicy(body));
     }
     if (pathname === "/api/categories") {
       if (method === "GET") return ok({ items: repository.listCategories() });
@@ -318,6 +352,7 @@ function rateQuery(params, defaultVisibility = "all", allowVisibility = false) {
     categoryId: params.get("categoryId") || undefined,
     tag: params.get("tag") || "",
     platform: params.get("platform") || "",
+    modelFamily: params.get("modelFamily") || "",
     status: params.get("status") || "",
     authStatus: params.get("authStatus") || "",
     visibility: allowVisibility ? params.get("visibility") || defaultVisibility : defaultVisibility,

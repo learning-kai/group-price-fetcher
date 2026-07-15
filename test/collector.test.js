@@ -157,13 +157,92 @@ test("collector forwards provider-specific authentication headers", async () => 
   assert.deepEqual(calls[0].headers, { Authorization: "system-token", "New-Api-User": "123" });
 });
 
+test("collector enqueues persisted changes and low balance without waiting for notification work", async () => {
+  const never = new Promise(() => {});
+  const calls = [];
+  const result = {
+    ...sampleResult(0.02),
+    account: { status: "known", balanceUsd: 4.5, error: "password=must-not-leak" }
+  };
+  const fixture = collectorFixture({
+    provider: sequenceProvider([result]),
+    savedCollection: { insertedVersions: 1, groupCount: 1, changeCount: 1, changes: [{ id: 9, changeType: "ratio_changed" }] },
+    notificationService: {
+      enqueueCollectionChanges(changes) { calls.push(["changes", changes]); return never; },
+      enqueueEvent(event) { calls.push(["event", event]); return never; }
+    }
+  });
+
+  const collected = await Promise.race([
+    fixture.collector.collectSite({ ...fixture.site, balanceThresholdUsd: 5 }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("collector waited for notifications")), 100))
+  ]);
+
+  assert.equal(collected, result);
+  assert.deepEqual(calls[0], ["changes", [{ id: 9, changeType: "ratio_changed" }]]);
+  assert.equal(calls[1][0], "event");
+  assert.deepEqual(calls[1][1], {
+    siteId: 1,
+    siteName: "正常站",
+    changeType: "balance_low",
+    balanceUsd: 4.5,
+    balanceThresholdUsd: 5
+  });
+  assert.equal(JSON.stringify(calls).includes("must-not-leak"), false);
+});
+
+test("collector does not emit low balance when threshold is unset or zero", async () => {
+  const events = [];
+  const notificationService = {
+    enqueueCollectionChanges() { return true; },
+    enqueueEvent(event) { events.push(event); return true; }
+  };
+  const result = {
+    ...sampleResult(0.02),
+    account: { status: "known", balanceUsd: -0.5 }
+  };
+  for (const balanceThresholdUsd of [null, 0]) {
+    const fixture = collectorFixture({ provider: sequenceProvider([result]), notificationService });
+    await fixture.collector.collectSite({ ...fixture.site, balanceThresholdUsd });
+  }
+  assert.deepEqual(events, []);
+});
+
+test("collector classifies final auth and collection failures without leaking raw errors", async () => {
+  const events = [];
+  const notificationService = {
+    enqueueCollectionChanges() { throw new Error("notifier throws"); },
+    enqueueEvent(event) { events.push(event); throw new Error("notifier throws"); }
+  };
+  const auth = collectorFixture({
+    provider: sequenceProvider([new ApiError("token=raw-auth-secret", { status: 401 })]),
+    notificationService
+  });
+  await assert.rejects(() => auth.collector.collectSite(auth.site), /raw-auth-secret/);
+
+  const failed = collectorFixture({
+    provider: sequenceProvider([new ApiError("password=raw-provider-secret", { status: 503 })]),
+    notificationService,
+    sleep: async () => {}
+  });
+  await assert.rejects(() => failed.collector.collectSite(failed.site), /raw-provider-secret/);
+
+  assert.deepEqual(events.map((event) => event.changeType), ["auth_failed", "collection_failed"]);
+  assert.equal(JSON.stringify(events).includes("raw-auth-secret"), false);
+  assert.equal(JSON.stringify(events).includes("raw-provider-secret"), false);
+  assert.deepEqual(events.map(({ siteId, siteName }) => ({ siteId, siteName })), [
+    { siteId: 1, siteName: "正常站" },
+    { siteId: 1, siteName: "正常站" }
+  ]);
+});
+
 function collectorFixture(options = {}) {
   let nextRunId = 1;
   const finishedRuns = [];
   const authCalls = [];
   const repository = {
     startRun() { return nextRunId++; },
-    saveCollection() { return { insertedVersions: 1 }; },
+    saveCollection() { return options.savedCollection ?? { insertedVersions: 1, groupCount: 1, changeCount: 0, changes: [] }; },
     finishRun(_id, input) { finishedRuns.push(input); return input; }
   };
   const authManager = options.authManager ?? {
@@ -178,7 +257,8 @@ function collectorFixture(options = {}) {
     authManager,
     getProvider: () => provider,
     queue: createTaskQueue({ concurrency: 3, timeoutMs: 2_000 }),
-    sleep: options.sleep ?? (async () => {})
+    sleep: options.sleep ?? (async () => {}),
+    notificationService: options.notificationService
   });
   return {
     collector,

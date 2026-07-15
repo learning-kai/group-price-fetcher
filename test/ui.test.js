@@ -11,7 +11,7 @@ test("dashboard layout contains responsive overflow guards for dense tables and 
   assert.match(styles, /\.table-scroll\s*\{[^}]*overscroll-behavior-inline:\s*contain/s);
   assert.match(styles, /\.settings-block\s*\{[^}]*min-width:\s*0/s);
   assert.match(styles, /\.inline-form[^\{]*\{[^}]*flex-wrap:\s*wrap/s);
-  assert.match(styles, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.nav\s*\{[^}]*repeat\(4,\s*minmax\(0,\s*1fr\)\)/s);
+  assert.match(styles, /@media\s*\(max-width:\s*760px\)[\s\S]*?\.nav\s*\{[^}]*repeat\(5,\s*minmax\(0,\s*1fr\)\)/s);
 });
 
 test("dashboard exposes management, filtering, sorting, pagination and history controls", async () => {
@@ -70,6 +70,17 @@ test("dashboard script uses management APIs and explicit auth actions", async ()
   assert.match(script, /safeHandler/);
   assert.match(script, /siteCurrentRateMultiplier/);
   assert.match(script, /当前账号未选择固定倍率|账号存在多个当前倍率/);
+  assert.match(script, /Number\(rate\.siteCurrentRateMultiplier\)\s*>\s*Number\(rate\.effectiveRateMultiplier\)/);
+  assert.match(script, /登录账号当前倍率高于该分组实际倍率|GPT 用 1111|Grok 用密钥 grok|modelFamily/);
+  assert.match(script, /function safeExternalUrl\(value, providerId\)/);
+  assert.match(script, /providerId === ["']newapi["'][\s\S]*?["']\/console\/token["']/);
+  assert.match(script, /data-provider-id=/);
+  assert.match(script, /rate-value\s+overpriced/);
+});
+
+test("current account rate above effective rate uses a red warning style", async () => {
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(styles, /\.rate-value\.overpriced\s*\{[^}]*color:\s*var\(--vermilion\)/s);
 });
 
 test("site editor supports portable sub2api tokens and Windows session capture", async () => {
@@ -130,6 +141,21 @@ test("site form edits a positive rate conversion factor", async () => {
   assert.match(input, /value=["']1["']/);
   assert.match(script, /#site-rate-conversion-factor["']\)\.value\s*=\s*site\?\.rateConversionFactor\s*\?\?\s*1/);
   assert.match(script, /rateConversionFactor:\s*Number\(\$\(["']#site-rate-conversion-factor["']\)\.value\)/);
+});
+
+
+test("settings and rate filters expose independent GPT and Grok pricing domains", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const id of [
+    "model-family-filter", "metric-gpt-min", "metric-grok-min", "dynamic-ratio-form",
+    "dynamic-gpt-enabled", "dynamic-gpt-group", "dynamic-gpt-service-multiplier", "dynamic-gpt-minimum", "dynamic-gpt-maximum", "dynamic-gpt-threshold", "dynamic-gpt-status",
+    "dynamic-grok-enabled", "dynamic-grok-group", "dynamic-grok-service-multiplier", "dynamic-grok-minimum", "dynamic-grok-maximum", "dynamic-grok-threshold", "dynamic-grok-status"
+  ]) assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+  assert.ok(script.includes("/api/settings/dynamic-ratio"));
+  assert.match(script, /modelFamily/);
+  assert.match(script, /policies/);
+  assert.match(html, /Grok 渠道分组待配置/);
 });
 
 test("settings exposes ordinary exports and password-safe encrypted backup controls", async () => {
@@ -200,4 +226,100 @@ test("settings exposes encrypted site transfer import and export controls", asyn
   assert.match(script, /needsCredentials/);
   assert.match(script, /finally\s*\{[\s\S]*?#transfer-export-password[\s\S]*?\.value\s*=\s*["']["']/);
   assert.match(script, /finally\s*\{[\s\S]*?#transfer-import-password[\s\S]*?\.value\s*=\s*["']["']/);
+});
+
+test("notification center exposes accessible management, subscription, log and policy controls", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  for (const id of [
+    "view-notifications",
+    "notification-kpis",
+    "notification-enabled-count",
+    "notification-success-count",
+    "notification-failed-count",
+    "notification-low-balance-count",
+    "notification-channels-body",
+    "add-notification-channel",
+    "notification-dialog",
+    "notification-form",
+    "notification-name",
+    "notification-type",
+    "notification-config-fields",
+    "notification-sites",
+    "notification-events",
+    "notification-logs-body",
+    "notification-policy-form",
+    "policy-min-ratio-change",
+    "policy-balance-cooldown",
+    "policy-failure-cooldown",
+    "policy-retry-attempts"
+  ]) assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+
+  assert.match(html, /data-view=["']notifications["'][^>]*>[\s\S]*?通知中心/);
+  for (const [value, label] of [["telegram", "Telegram"], ["webhook", "Webhook"], ["email", "Email"], ["wecom", "企业微信"], ["dingtalk", "钉钉"], ["feishu", "飞书"]]) {
+    assert.match(html, new RegExp(`<option[^>]*value=["']${value}["'][^>]*>${label}</option>`));
+  }
+  for (const eventType of ["ratio_changed", "group_added", "group_removed", "balance_low", "auth_failed", "collection_failed"]) {
+    assert.match(html, new RegExp(`type=["']checkbox["'][^>]*value=["']${eventType}["']`));
+  }
+  assert.match(html, /<select[^>]*id=["']notification-sites["'][^>]*multiple/);
+  assert.match(html, /未选择站点时订阅全部站点/);
+  assert.match(html, /<dialog[^>]*id=["']notification-dialog["'][^>]*aria-labelledby=/);
+});
+
+test("notification editor declares type-specific fields without embedding saved secrets", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const id of [
+    "notification-bot-token", "notification-chat-id", "notification-webhook-url",
+    "notification-webhook-method", "notification-webhook-headers", "notification-smtp-host",
+    "notification-smtp-port", "notification-smtp-username", "notification-smtp-password",
+    "notification-email-from", "notification-email-recipients", "notification-platform-webhook-url",
+    "notification-signing-secret"
+  ]) assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+
+  assert.match(html, /<textarea[^>]*id=["']notification-webhook-headers["']/);
+  for (const id of ["notification-bot-token", "notification-smtp-password", "notification-signing-secret"]) {
+    const input = html.match(new RegExp(`<input[^>]*id=["']${id}["'][^>]*>`))?.[0] ?? "";
+    assert.match(input, /type=["']password["']/i);
+    assert.doesNotMatch(input, /\svalue=/i);
+  }
+  assert.match(script, /function clearNotificationSecrets\(\)[\s\S]*?#notification-bot-token[\s\S]*?#notification-smtp-password[\s\S]*?#notification-signing-secret/);
+  assert.match(script, /configFields/);
+  assert.doesNotMatch(script, /channel\.config\.(botToken|password|secret)/);
+});
+
+test("notification UI uses existing APIs, BASE_PATH routing and destructive confirmations", async () => {
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  for (const endpoint of ["/api/notifications/channels", "/api/notifications/logs", "/api/notifications/policy", "/api/sites"]) {
+    assert.ok(script.includes(endpoint), `missing API usage ${endpoint}`);
+  }
+  assert.match(script, /appPath\(`\/api\/notifications\/channels\/\$\{[^}]+\}\/test`\)/);
+  assert.match(script, /confirm\([^)]*删除通知渠道/);
+  assert.match(script, /JSON\.parse\([^)]*notification-webhook-headers/);
+  assert.match(script, /subscriptions:/);
+  assert.match(script, /eventTypes:/);
+  assert.match(script, /balanceCooldownHours/);
+  assert.match(script, /failureCooldownMinutes/);
+  assert.match(script, /retryAttempts/);
+});
+
+test("sites and changes expose balance and recent-change summaries", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const script = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const styles = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  for (const id of [
+    "site-balance-kpis", "balance-known-count", "balance-total-value", "balance-low-count",
+    "balance-issue-count", "site-balance-threshold", "changes-summary", "changes-total-count",
+    "changes-up-count", "changes-down-count", "changes-added-count", "changes-removed-count"
+  ]) assert.match(html, new RegExp(`id=["']${id}["']`), `missing #${id}`);
+  assert.match(script, /balanceThresholdUsd:\s*[^,\n]+/);
+  assert.match(script, /balanceStatus/);
+  assert.match(script, /balanceUsd/);
+  assert.match(script, /ratio_changed/);
+  assert.match(script, /group_added/);
+  assert.match(script, /group_removed/);
+  assert.match(styles, /\.balance-status\.(known|low)/);
+  assert.match(styles, /\.balance-status\.(unknown|unavailable)/);
+  assert.match(styles, /\.balance-status\.error/);
+  assert.match(styles, /\.notification-table[^\{]*\{[^}]*min-width:/s);
 });

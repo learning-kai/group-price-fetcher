@@ -11,6 +11,7 @@ import { createCollector } from "./collector.js";
 import { resolveEdgeToken } from "./edgeAuth.js";
 import { createExportService } from "./exportService.js";
 import { getProvider } from "./providerRegistry.js";
+import { createNotificationService } from "./notificationService.js";
 import { createApiRouter, errorResponse } from "./routes.js";
 import { createScheduler } from "./scheduler.js";
 import { redactSecrets } from "./security.js";
@@ -54,11 +55,16 @@ export function createDefaultServices(options = {}) {
     dbPath: paths.dbPath
   });
   const siteTransferService = createSiteTransferService({ repository, credentialStore, authManager });
+  const notificationService = createNotificationService({
+    repository,
+    credentialStore,
+    onError: (error) => console.error(redactSecrets(`[notification] ${error.message}`))
+  });
   const queue = createTaskQueue({
     concurrency: Number(process.env.COLLECTOR_CONCURRENCY || 5),
     timeoutMs: Number(process.env.COLLECTOR_TIMEOUT_MS || 90_000)
   });
-  const collector = createCollector({ repository, authManager, getProvider, queue });
+  const collector = createCollector({ repository, authManager, getProvider, queue, notificationService });
   const scheduler = createScheduler({
     repository,
     credentialStore,
@@ -72,11 +78,13 @@ export function createDefaultServices(options = {}) {
     authManager,
     exportService,
     siteTransferService,
+    notificationService,
     queue,
     collector,
     scheduler,
     async close() {
       scheduler.stop();
+      await notificationService.close();
       await authManager.close();
       repository.close();
     }

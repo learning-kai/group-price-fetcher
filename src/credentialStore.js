@@ -182,7 +182,7 @@ function spawnWithInput(executable, args, input) {
 }
 
 function validateReference(reference) {
-  if (!/^site:\d+$/.test(String(reference))) throw new Error("凭据引用无效");
+  if (!/^(?:site:\d+|notification:[1-9]\d*)$/.test(String(reference))) throw new Error("凭据引用无效");
 }
 
 function validateCredentials(credentials) {

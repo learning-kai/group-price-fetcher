@@ -47,7 +47,7 @@ test("fetchPrices uses user endpoints and summarizes rates", async () => {
     throw new Error(`unexpected ${request.path}`);
   });
 
-  assert.deepEqual(calls, ["/groups/available", "/groups/rates", "/keys"]);
+  assert.deepEqual(calls, ["/groups/available", "/groups/rates", "/keys", "/auth/me"]);
   assert.equal(result.groups.length, 2);
   assert.equal(result.groups[1].effectiveRateMultiplier, 1.5);
   assert.equal(result.currentRates[0].currentRateMultiplier, 1.5);

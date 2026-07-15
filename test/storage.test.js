@@ -48,6 +48,98 @@ test("repository migrations are idempotent and site configuration round-trips", 
   }
 });
 
+test("v9 migration adds notification storage and maps site balance thresholds", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({
+      name: "余额告警站",
+      baseUrl: "https://balance-alert.example.com",
+      balanceThresholdUsd: 12.5
+    });
+    assert.equal(site.balanceThresholdUsd, 12.5);
+    assert.equal(fixture.repo.updateSite(site.id, { balanceThresholdUsd: null }).balanceThresholdUsd, null);
+
+    const channel = fixture.repo.createNotificationChannel({
+      name: "运维群",
+      type: "webhook",
+      enabled: true,
+      subscriptions: [site.id],
+      eventTypes: ["ratio_changed"]
+    });
+    assert.deepEqual(channel.subscriptions, [site.id]);
+    assert.deepEqual(channel.eventTypes, ["ratio_changed"]);
+    assert.equal(fixture.repo.listNotificationChannels().length, 1);
+    assert.equal(fixture.repo.updateNotificationChannel(channel.id, { enabled: false }).enabled, false);
+
+    const log = fixture.repo.createNotificationLog({
+      channelId: channel.id,
+      eventType: "ratio_changed",
+      status: "sent",
+      message: "1 change",
+      attempts: 1
+    });
+    assert.equal(fixture.repo.listNotificationLogs({ channelId: channel.id }).items[0].id, log.id);
+    fixture.repo.setNotificationCooldown(channel.id, "site:1:ratio_changed", "2026-07-14T01:00:00.000Z");
+    assert.equal(fixture.repo.getNotificationCooldown(channel.id, "site:1:ratio_changed"), "2026-07-14T01:00:00.000Z");
+    assert.deepEqual(fixture.repo.getNotificationPolicy(), {
+      minRatioChangePercent: 0,
+      balanceCooldownHours: 24,
+      failureCooldownMinutes: 60,
+      retryAttempts: 3
+    });
+    assert.deepEqual(
+      fixture.repo.setNotificationPolicy({ cooldownMinutes: 120, minRatioChangePercent: 2.5 }),
+      { minRatioChangePercent: 2.5, balanceCooldownHours: 2, failureCooldownMinutes: 120, retryAttempts: 3 }
+    );
+
+    const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
+    try {
+      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 11);
+      for (const table of ["notification_channels", "notification_logs", "notification_cooldowns"]) {
+        assert.equal(raw.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = ?").get(table).count, 1);
+      }
+    } finally { raw.close(); }
+
+    assert.equal(fixture.repo.deleteNotificationChannel(channel.id), true);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("notification policy migrates legacy cooldownMinutes and validates canonical fields", async () => {
+  const fixture = await createFixture();
+  try {
+    const raw = new DatabaseSync(fixture.dbPath);
+    try {
+      raw.prepare("INSERT INTO settings(key, value) VALUES ('notification_policy', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .run(JSON.stringify({ cooldownMinutes: 90, minRatioChangePercent: 1.5 }));
+    } finally { raw.close(); }
+
+    assert.deepEqual(fixture.repo.getNotificationPolicy(), {
+      minRatioChangePercent: 1.5,
+      balanceCooldownHours: 1.5,
+      failureCooldownMinutes: 90,
+      retryAttempts: 3
+    });
+    assert.deepEqual(fixture.repo.setNotificationPolicy({
+      minRatioChangePercent: 3,
+      balanceCooldownHours: 12,
+      failureCooldownMinutes: 30,
+      retryAttempts: 2
+    }), {
+      minRatioChangePercent: 3,
+      balanceCooldownHours: 12,
+      failureCooldownMinutes: 30,
+      retryAttempts: 2
+    });
+    assert.throws(() => fixture.repo.setNotificationPolicy({ retryAttempts: 0 }), /重试/);
+    assert.throws(() => fixture.repo.setNotificationPolicy({ retryAttempts: 4 }), /重试/);
+    assert.equal("cooldownMinutes" in fixture.repo.getNotificationPolicy(), false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("v4 through v6 migrations preserve legacy data and add site conversion", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "group-price-v4-migration-"));
   const dbPath = path.join(dir, "prices.db");
@@ -82,11 +174,14 @@ test("v4 through v6 migrations preserve legacy data and add site conversion", as
 
     const verification = new DatabaseSync(dbPath);
     try {
-      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 7);
+      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 11);
       assert.equal(
         verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'hidden_rate_groups'").get().count,
         1
       );
+      const siteColumns = new Set(verification.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      assert.equal(siteColumns.has("balance_usd"), true);
+      assert.equal(siteColumns.has("balance_status"), true);
       const conversion = verification.prepare("SELECT rate_conversion_factor FROM sites WHERE id = ?").get(site.id);
       assert.equal(conversion.rate_conversion_factor, 1);
     } finally {
@@ -153,6 +248,64 @@ test("site conversion adjusts rate reads and sorting without rewriting collected
   }
 });
 
+
+test("dynamic New API ratio policies separate GPT and Grok while migrating legacy settings", async () => {
+  const fixture = await createFixture();
+  try {
+    const defaults = fixture.repo.getDynamicRatioSettings();
+    assert.equal(defaults.version, 2);
+    assert.deepEqual(defaults.policies.map((policy) => policy.family), ["gpt", "grok"]);
+    assert.equal(defaults.policies[0].group, "default");
+    assert.equal(defaults.policies[1].group, "grok");
+    assert.equal(defaults.policies[1].enabled, false);
+
+    const legacyDb = new DatabaseSync(fixture.dbPath);
+    legacyDb.prepare("INSERT INTO settings(key, value) VALUES ('dynamic_ratio_settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify({
+      enabled: true, group: "default", serviceMultiplier: 1.35,
+      minimum: 0.02, maximum: 2, changeThreshold: 0.1
+    }));
+    legacyDb.close();
+    const migrated = fixture.repo.getDynamicRatioSettings();
+    assert.equal(migrated.policies[0].enabled, true);
+    assert.equal(migrated.policies[0].serviceMultiplier, 1.35);
+    assert.equal(migrated.policies[1].enabled, false);
+
+    const saved = fixture.repo.setDynamicRatioSettings({
+      version: 2,
+      policies: [
+        { family: "gpt", enabled: true, group: "default", serviceMultiplier: 1, minimum: 0.001, maximum: 10, changeThreshold: 0.001 },
+        { family: "grok", enabled: false, group: "grok", serviceMultiplier: 1, minimum: 0.001, maximum: 10, changeThreshold: 0.001 }
+      ]
+    });
+    assert.deepEqual(fixture.repo.getDynamicRatioSettings(), saved);
+    assert.throws(() => fixture.repo.setDynamicRatioSettings({
+      version: 2,
+      policies: [{ ...saved.policies[0], serviceMultiplier: 0 }, saved.policies[1]]
+    }), /服务倍率/);
+  } finally { await fixture.cleanup(); }
+});
+
+test("rates expose and filter independent GPT and Grok model families", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({ name: "族测试站", baseUrl: "https://family.example.com" });
+    const result = sampleCollection(0.02);
+    result.groups = [
+      { ...result.groups[0], groupId: "gpt", groupName: "OpenAI 特价", platform: "openai", effectiveRateMultiplier: 0.02 },
+      { ...result.groups[0], groupId: "grok", groupName: "福利Grok", platform: "openai", effectiveRateMultiplier: 0.001 },
+      { ...result.groups[0], groupId: "grok-video", groupName: "Grok视频", platform: "video", effectiveRateMultiplier: 1 }
+    ];
+    fixture.repo.saveCollection(site.id, result, "2026-07-13T00:00:00.000Z");
+
+    const all = fixture.repo.listLatestRates({ siteId: site.id, pageSize: 20 }).items;
+    assert.deepEqual(Object.fromEntries(all.map((rate) => [rate.groupId, rate.modelFamily])), {
+      gpt: "gpt", grok: "grok", "grok-video": "other"
+    });
+    assert.deepEqual(fixture.repo.listLatestRates({ siteId: site.id, modelFamily: "gpt" }).items.map((rate) => rate.groupId), ["gpt"]);
+    assert.deepEqual(fixture.repo.listLatestRates({ siteId: site.id, modelFamily: "grok" }).items.map((rate) => rate.groupId), ["grok"]);
+  } finally { await fixture.cleanup(); }
+});
+
 test("collection persists the logged-in account current selected rate for each site", async () => {
   const fixture = await createFixture();
   try {
@@ -179,6 +332,93 @@ test("collection persists the logged-in account current selected rate for each s
     const rate = fixture.repo.listLatestRates({ siteId: site.id }).items[0];
     assert.equal(rate.siteCurrentRateMultiplier, 0.15);
     assert.equal(rate.siteCurrentRateAmbiguous, false);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("rates compare GPT and Grok current account rates by separate pricing identities", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({
+      name: "分家族当前倍率站",
+      baseUrl: "https://family-current.example.com",
+      rateConversionFactor: 0.5
+    });
+    const result = collectionWithGroups([
+      detailedGroup("vip", { groupName: "OpenAI 特价", platform: "openai", rate: 0.02 }),
+      detailedGroup("grok", { groupName: "grok", platform: "openai", rate: 0.001 }),
+      detailedGroup("grok-sale", { groupName: "福利Grok", platform: "openai", rate: 0.0005 })
+    ]);
+    result.summary = {
+      currentRateMultiplier: 0.3,
+      currentRateAmbiguous: false,
+      currentRateCount: 1,
+      currentRatesByFamily: {
+        gpt: {
+          currentRateMultiplier: 0.3,
+          currentRateAmbiguous: false,
+          currentRateCount: 1,
+          currentRateKeyName: "1111"
+        },
+        grok: {
+          currentRateMultiplier: 0.001,
+          currentRateAmbiguous: false,
+          currentRateCount: 1,
+          currentRateKeyName: "grok",
+          currentRateGroupName: "福利Grok"
+        }
+      }
+    };
+    fixture.repo.saveCollection(site.id, result, "2026-07-13T00:00:00.000Z");
+
+    const rates = Object.fromEntries(
+      fixture.repo.listLatestRates({ siteId: site.id, pageSize: 20 }).items
+        .map((rate) => [rate.groupId, rate])
+    );
+    assert.equal(rates.vip.modelFamily, "gpt");
+    assert.equal(rates.vip.siteCurrentRateMultiplier, 0.15);
+    assert.equal(rates.vip.sourceSiteCurrentRateMultiplier, 0.3);
+    assert.equal(rates.vip.siteCurrentRateAmbiguous, false);
+    assert.equal(rates.vip.siteCurrentRateKeyName, "1111");
+
+    assert.equal(rates.grok.modelFamily, "grok");
+    assert.equal(rates.grok.siteCurrentRateMultiplier, 0.0005);
+    assert.equal(rates.grok.sourceSiteCurrentRateMultiplier, 0.001);
+    assert.equal(rates.grok.siteCurrentRateKeyName, "grok");
+    assert.equal(rates.grok.siteCurrentRateGroupName, "福利Grok");
+
+    assert.equal(rates["grok-sale"].modelFamily, "grok");
+    assert.equal(rates["grok-sale"].siteCurrentRateMultiplier, 0.0005);
+    assert.equal(rates["grok-sale"].siteCurrentRateKeyName, "grok");
+    // Grok sale effective 0.0005 converted, current 0.0005 converted => not overpriced after conversion.
+    assert.equal(rates["grok-sale"].effectiveRateMultiplier, 0.00025);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("collection persists account balance and keeps the last known value when refresh is unavailable", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({ name: "余额站", baseUrl: "https://balance.example.com" });
+    const known = sampleCollection(0.2);
+    known.account = { status: "known", balanceUsd: 12.34, source: "sub2api:auth/me", error: "", fetchedAt: "2026-07-13T00:00:00.000Z" };
+    fixture.repo.saveCollection(site.id, known, "2026-07-13T00:00:00.000Z");
+    let saved = fixture.repo.getSite(site.id);
+    assert.equal(saved.balanceUsd, 12.34);
+    assert.equal(saved.balanceStatus, "known");
+    assert.equal(saved.balanceSource, "sub2api:auth/me");
+    assert.equal(saved.balanceUpdatedAt, "2026-07-13T00:00:00.000Z");
+
+    const unavailable = sampleCollection(0.2);
+    unavailable.account = { status: "unavailable", balanceUsd: null, source: "sub2api:auth/me", error: "HTTP 403", fetchedAt: "2026-07-13T01:00:00.000Z" };
+    fixture.repo.saveCollection(site.id, unavailable, "2026-07-13T01:00:00.000Z");
+    saved = fixture.repo.getSite(site.id);
+    assert.equal(saved.balanceUsd, 12.34);
+    assert.equal(saved.balanceStatus, "unavailable");
+    assert.equal(saved.balanceUpdatedAt, "2026-07-13T00:00:00.000Z");
+    assert.equal(saved.balanceError, "HTTP 403");
   } finally {
     await fixture.cleanup();
   }
@@ -325,6 +565,7 @@ test("collections record explicit changes after suppressing the initial baseline
     const run1 = fixture.repo.startRun(site.id, "test", "2026-07-13T00:00:00.000Z");
     const baseline = fixture.repo.saveCollection(site.id, initial, "2026-07-13T00:00:00.000Z", run1);
     assert.equal(baseline.changeCount, 0);
+    assert.deepEqual(baseline.changes, []);
     assert.deepEqual(fixture.repo.listChanges({ siteId: site.id }).items, []);
 
     const changed = collectionWithGroups([
@@ -345,9 +586,16 @@ test("collections record explicit changes after suppressing the initial baseline
     const run2 = fixture.repo.startRun(site.id, "test", "2026-07-13T01:00:00.000Z");
     const saved = fixture.repo.saveCollection(site.id, changed, "2026-07-13T01:00:00.000Z", run2);
     assert.equal(saved.changeCount, 11);
+    assert.equal(saved.insertedVersions, 2);
+    assert.equal(saved.groupCount, 2);
+    assert.equal(saved.changes.length, 11);
 
     const events = fixture.repo.listChanges({ siteId: site.id, page: 1, pageSize: 50 });
     assert.equal(events.total, 11);
+    assert.deepEqual(
+      saved.changes.toSorted((left, right) => left.id - right.id),
+      events.items.toSorted((left, right) => left.id - right.id)
+    );
     assert.deepEqual(new Set(events.items.map((event) => event.changeType)), new Set([
       "group_added",
       "group_removed",
@@ -371,6 +619,7 @@ test("collections record explicit changes after suppressing the initial baseline
     const run3 = fixture.repo.startRun(site.id, "test", "2026-07-13T02:00:00.000Z");
     const unchanged = fixture.repo.saveCollection(site.id, changed, "2026-07-13T02:00:00.000Z", run3);
     assert.equal(unchanged.changeCount, 0);
+    assert.deepEqual(unchanged.changes, []);
     assert.equal(fixture.repo.listChanges({ siteId: site.id }).total, 11);
   } finally {
     await fixture.cleanup();

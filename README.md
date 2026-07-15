@@ -1,62 +1,79 @@
 # Group Price Fetcher
 
-![License](https://img.shields.io/badge/license-MIT-2ea44f)
-![Version](https://img.shields.io/badge/version-0.1.0-0969da)
-![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white)
-![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-345f9d)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0-0969da)](https://github.com/learning-kai/group-price-fetcher)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-345f9d)](#quick-start)
+[![GitHub release](https://img.shields.io/github/v/release/learning-kai/group-price-fetcher?include_prereleases&label=release)](https://github.com/learning-kai/group-price-fetcher/releases)
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A self-hosted Windows and Linux dashboard that collects, compares, and exposes group pricing from sub2api, NewAPI, and compatible API gateways.
+Turn scattered gateway dashboards into one local rate console: collect authenticated group multipliers, compare GPT/Grok pricing separately, keep encrypted credentials off disk-as-plaintext, and expose a stable read-only API for other tools.
 
-## Why
-
-Gateway pricing is often scattered across authenticated dashboards with incompatible response formats. Group Price Fetcher keeps collection, sorting, history, authentication state, and external integrations in one local tool without putting credentials in the project directory.
-
-## Core Features
-
-- Collects group multipliers from sub2api-style and NewAPI endpoints.
-- Removes the visible Uling19 Provider, leaving sub2api and NewAPI. SQLite schema v4 automatically migrates legacy `uling-gateway` sites to `sub2api` without changing their URLs, site records, or rate history.
-- Supports sub2api email/password and portable Token authentication, NewAPI public and token-enhanced collection, and a persistent Edge profile fallback.
-- Encrypts saved credentials with Windows DPAPI or a server-side Linux AES-256-GCM vault; SQLite stores metadata only.
-- Sorts and filters rates by site, category, tag, platform, group status, and authentication status.
-- Supports per-site rate conversion factors and locally hidden groups without rewriting collected history.
-- Records explicit add, remove, ratio, description, RPM, quota, billing, and peak-rule changes.
-- Runs scheduled collection with bounded concurrency and per-site failure isolation.
-- Exposes stable read-only endpoints under `/api/external/v1` for other local or LAN software.
-- Exports ordinary JSON/CSV data and password-encrypted, portable `.gpfbackup` disaster-recovery archives.
-- Exchanges site configuration and account credentials between independent instances with encrypted `.gpftransfer` files.
-
-## Screenshots & Demo
+```bash
+npm install
+npm start
+# open http://127.0.0.1:5177
+```
 
 ![Group Price Fetcher dashboard](docs/assets/dashboard.png)
 
-The dashboard is served at `http://127.0.0.1:5177` by default and can be placed behind an authenticated HTTPS reverse proxy.
+## Why
+
+API gateway pricing usually lives behind logins, mixed response shapes, and per-site quirks. Comparing “what my account actually pays” across sub2api and NewAPI sites should not require reopening every admin panel, pasting tokens into notebooks, or committing secrets into a repo.
+
+Group Price Fetcher is the local control plane for that work: one dashboard, scheduled collection, explicit change history, encrypted credential storage, backups, and a versioned external API.
+
+## Core Features
+
+- Collect group multipliers from **sub2api** and **NewAPI** style gateways
+- Track **authenticated current rates** for GPT and Grok as separate pricing domains
+- Support password, portable token, public, token-enhanced, and Windows Edge-profile auth paths
+- Encrypt credentials with **Windows DPAPI** or a **Linux AES-256-GCM vault**; SQLite keeps metadata only
+- Sort and filter by site, category, tag, platform, group status, and auth status
+- Apply per-site conversion factors and hide groups locally without rewriting history
+- Record concrete change events: add/remove, ratio, description, RPM, quota, billing, peak rules
+- Run scheduled collection with bounded concurrency and per-site failure isolation
+- Send optional notifications for rate changes, low balance, auth failures, and collection failures
+- Expose stable read-only endpoints under `/api/external/v1`
+- Export JSON/CSV, password-encrypted `.gpfbackup` disaster archives, and portable `.gpftransfer` site packages
+
+## Screenshots & Demo
+
+| Dashboard | Default URL |
+|---|---|
+| Live local console | `http://127.0.0.1:5177` |
+
+The UI is a single local service. For public exposure, keep Node on loopback and terminate HTTPS + auth at a reverse proxy.
 
 ## Quick Start
 
 ### Requirements
 
 - Windows 10/11 or a current Linux distribution
-- Node.js 22.5 or newer
-- Microsoft Edge for browser-profile authentication on Windows
+- Node.js **22.5+**
+- Microsoft Edge only if you use Windows Edge-profile extraction
+
+### Windows
 
 ```powershell
 npm install
 npm start
 ```
 
-Open [http://127.0.0.1:5177](http://127.0.0.1:5177), add a site, select its Provider and authentication mode, then run the first manual refresh.
+Open [http://127.0.0.1:5177](http://127.0.0.1:5177), add a site, choose Provider + auth mode, then run the first manual refresh.
 
-To install an automatic task for the current Windows user:
+Optional auto-start for the current Windows user:
 
 ```powershell
 npm run startup:install
+# remove later:
+npm run startup:uninstall
 ```
 
-Remove it with `npm run startup:uninstall`.
+### Linux
 
-For Linux, persist a random 32-byte hexadecimal vault key in a root-only environment file and set a data directory outside the repository:
+Put the data directory and vault key **outside** the repository:
 
 ```bash
 export GROUP_PRICE_FETCHER_HOME=/var/lib/group-price-fetcher
@@ -65,25 +82,30 @@ npm install
 npm start
 ```
 
-Keep the same vault key across restarts; losing or rotating it makes the existing credential vault unreadable. Linux supports public, NewAPI token, sub2api password, and portable sub2api Token authentication. Edge Profile authentication and extraction remain Windows-only. For public hosting, keep Node bound to `127.0.0.1` and require HTTPS plus authentication at the reverse proxy.
+Keep the same vault key across restarts. Losing or rotating it makes the existing credential vault unreadable.
 
-### Portable sub2api Token workflow
+Linux supports public, NewAPI token, sub2api password, and portable sub2api token auth. Edge profile extraction remains Windows-only.
 
-On Windows, log in to an existing sub2api site with its dedicated Edge Profile, edit that site, and select **Extract Edge session**. The returned Access Token and optional Refresh Token are filled into sensitive fields once; save the site to switch it to `sub2api-token`. On Linux, edit the site and paste the same fields directly, or import an encrypted `.gpftransfer` created on Windows.
+### Portable sub2api token workflow
 
-The collector reuses a valid Access Token. If it expires and a Refresh Token is present, the collector rotates the tokens and writes the replacement back to the encrypted credential vault. If refresh is unavailable or rejected, the site becomes `login_required` and must be extracted again on Windows or updated manually. Raw tokens are not returned by ordinary status, site, export, or collection APIs.
+1. On Windows, log into the site with its dedicated Edge profile
+2. Edit the site → **Extract Edge session**
+3. Save Access Token / optional Refresh Token into the encrypted vault as `sub2api-token`
+4. On Linux, paste the same fields or import an encrypted `.gpftransfer` created on Windows
+
+The collector reuses a valid Access Token, refreshes when possible, and marks the site `login_required` when refresh fails. Ordinary status/export APIs never return raw tokens.
 
 ## External API
 
-Loopback requests do not require an API key:
+Loopback requests do not need an API key:
 
-```powershell
-Invoke-RestMethod http://127.0.0.1:5177/api/external/v1/sites
-Invoke-RestMethod http://127.0.0.1:5177/api/external/v1/rates
-Invoke-RestMethod http://127.0.0.1:5177/api/external/v1/changes
+```bash
+curl -sS http://127.0.0.1:5177/api/external/v1/sites
+curl -sS http://127.0.0.1:5177/api/external/v1/rates
+curl -sS http://127.0.0.1:5177/api/external/v1/changes
 ```
 
-Available versioned resources:
+Versioned resources:
 
 ```text
 GET /api/external/v1/sites
@@ -94,84 +116,90 @@ GET /api/external/v1/sites/:id/changes
 GET /api/external/v1/sites/:id/groups/:groupId/history
 ```
 
-For LAN access, generate an API key in Settings, start with `HOST=0.0.0.0`, and send `Authorization: Bearer <API_KEY>`. Management and credential endpoints remain loopback-only.
+For LAN access, generate an API key in Settings, start with `HOST=0.0.0.0`, and send:
 
-## Export, Backup & Restore
+```text
+Authorization: Bearer <api-key>
+```
 
-Settings provides three different export paths:
+Management and credential endpoints stay loopback-only.
 
-- Ordinary JSON/CSV exports contain only public site data, current rates, and change data. They contain no login credentials or API key hash and are not suitable for complete disaster recovery. JSON contains the public site, current-rate, and change collections; CSV contains current-rate rows.
-- A `.gpfbackup` file is a complete portable backup. It contains a checkpointed SQLite database and saved credentials, encrypted with scrypt (`N=32768`, `r=8`, `p=1`) and AES-256-GCM. The Edge Profile and browser cookies are not included.
-- A `.gpftransfer` file contains only portable site configuration and account credentials, including portable sub2api Access/Refresh Tokens. Import matches normalized URLs, overwrites the destination configuration without deleting rate history, clears credentials omitted by the package, and disables Edge-backed sites until they are authenticated locally.
+## Export, Backup & Transfer
 
-The backup password must contain at least 10 characters. It is never stored and cannot be recovered if lost.
+| Path | Contains | Use when |
+|---|---|---|
+| JSON / CSV export | Public site data, current rates, changes | Sharing rates without secrets |
+| `.gpfbackup` | Checkpointed SQLite + encrypted credentials | Full disaster recovery |
+| `.gpftransfer` | Portable site config + account credentials | Moving sites between instances |
 
-Restore offline from an interactive PowerShell terminal:
+`.gpfbackup` uses scrypt (`N=32768`, `r=8`, `p=1`) and AES-256-GCM. Edge profiles and browser cookies are not included. Backup passwords must be at least 10 characters and are never stored.
+
+Restore offline:
 
 ```powershell
 npm run backup:restore -- "C:\path\to\backup.gpfbackup"
 ```
 
-Stop the service listening on port 5177 before restoring; the CLI refuses to restore while that service is still running. Before replacement, restore creates pre-restore backups of the database and credential vault. If replacement fails, it rolls the database and vault back together.
+Stop the process on port 5177 first. The CLI refuses to restore while the service is running, creates pre-restore backups, and rolls database + vault back together if replacement fails.
 
 ## Engineering Quality
 
-The project uses the built-in Node.js test runner and real temporary SQLite databases. The suite covers 60-site concurrency, partial failures, authentication refresh, Provider normalization, change-only history, API authorization, credential redaction, cross-platform transfer vectors, Linux vault encryption, and restart recovery.
-
-```powershell
+```bash
 npm test
 npm run test:acceptance
 ```
 
-The suite intentionally excludes screenshot, responsive, layout, and visual-regression tests.
-
-## Troubleshooting
-
-- **Port 5177 is already in use:** stop the previous Node process or start with a different `PORT` value.
-- **Edge login does not open:** verify Microsoft Edge is installed in its standard Windows location.
-- **Linux reports a missing vault key:** provide the same 64-character hexadecimal `GROUP_PRICE_FETCHER_VAULT_KEY` on every restart.
-- **A site shows `login_required`:** edit its credentials or run the explicit Login/Validate action; scheduled jobs never open interactive login windows.
-- **LAN API returns 401:** generate a new API key in Settings and send it as a Bearer token.
-- **Credentials fail after moving computers:** DPAPI is bound to the original Windows user; use `.gpftransfer` to move portable credentials or enter them again.
+The suite uses Node’s built-in test runner and temporary SQLite databases. Coverage includes multi-site concurrency, partial failures, auth refresh, provider normalization, change-only history, API authorization, credential redaction, cross-platform transfer, Linux vault encryption, restart recovery, and notification center UI/API paths. Recent full runs report **162** passing tests.
 
 ## Project Docs
 
-- [Authentication, NewAPI, changes, and external API plan](docs/superpowers/plans/2026-07-13-auth-newapi-changes-external-api.md)
-- [Encrypted export design](docs/superpowers/specs/2026-07-13-provider-cleanup-encrypted-export-design.md)
-- [Encrypted export implementation plan](docs/superpowers/plans/2026-07-13-provider-cleanup-encrypted-export.md)
-- [Cross-platform site transfer format](docs/site-transfer-format.md)
+| Path | Purpose |
+|---|---|
+| `docs/assets/` | Dashboard screenshot |
+| `docs/site-transfer-format.md` | Portable transfer package format |
+| `docs/superpowers/` | Design notes and implementation plans |
+| `src/providers/` | sub2api / NewAPI collectors |
+| `src/notificationService.js` | Notification destinations and dispatch |
+| `public/` | Dashboard UI |
 
-## Privacy & Security
+## Privacy & Security Boundaries
 
-Runtime data lives outside the repository:
-
-```text
-%LOCALAPPDATA%\GroupPriceFetcher\data\prices.db
-%LOCALAPPDATA%\GroupPriceFetcher\data\credentials.vault
-%LOCALAPPDATA%\GroupPriceFetcher\profiles
-```
-
-Linux uses `GROUP_PRICE_FETCHER_HOME` (for example `/var/lib/group-price-fetcher`) and requires `GROUP_PRICE_FETCHER_VAULT_KEY`.
-
-- Passwords and NewAPI tokens are encrypted with Windows DPAPI CurrentUser scope or Linux AES-256-GCM using the deployment vault key.
-- Access tokens, refresh tokens, cookies, and passwords are excluded from SQLite, logs, ordinary JSON/CSV exports, and ordinary API responses. Saved credentials are included only inside password-encrypted `.gpfbackup` and `.gpftransfer` files; the explicit Windows extraction response is a one-time, `no-store` exception initiated by the local user.
-- API keys are stored as SHA-256 hashes.
-- Ordinary JSON/CSV exports never include the API key hash and are not complete backups. `.gpfbackup` archives are portable; `.gpftransfer` moves only site configuration and credentials. Neither format includes Edge Profile state or cookies.
-- A lost `.gpfbackup` password cannot be recovered.
-- Respect each upstream site's terms, rate limits, and access rules.
+- Credentials are encrypted at rest; the repo must never contain vault keys, `.env`, or live databases
+- SQLite stores operational metadata and rate history, not plaintext passwords
+- External API is read-only for rates/sites/changes
+- Management and credential endpoints remain loopback-only by design
+- Public deployment requires reverse-proxy HTTPS + authentication; do not expose Node directly on `0.0.0.0` without a key and network boundary
+- Backups that include credentials are password-protected; lost passwords cannot be recovered
 
 ## Release & Updates
 
-The current source version is `0.1.0`. Release notes and migration details will be published through GitHub Releases when tagged releases begin.
+- Current package version: **0.1.0**
+- Source of truth: [learning-kai/group-price-fetcher](https://github.com/learning-kai/group-price-fetcher)
+- Upgrade path: pull latest `main`, run `npm install`, restart the service, keep the same `GROUP_PRICE_FETCHER_HOME` and vault key
+
+```bash
+git pull
+npm install
+npm test
+npm start
+```
 
 ## Roadmap
 
-- Add optional change notifications.
+- Richer notification channel templates and delivery logs
+- Clearer multi-model family pricing views beyond GPT/Grok
+- Hardened reverse-proxy deployment examples
+- Optional signed update / release packaging
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Keep credentials and runtime databases out of fixtures, add behavior-first tests, and run `npm test` before submitting.
+1. Fork and create a feature branch
+2. Keep credentials and local `data/` out of commits
+3. Run `npm test` before opening a PR
+4. Prefer small, reviewable changes with real commands and fixtures
+
+Bug reports are most useful when they include Provider type, auth mode, Node version, and a redacted reproduction path.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+[MIT](LICENSE) © 2026 learning-kai

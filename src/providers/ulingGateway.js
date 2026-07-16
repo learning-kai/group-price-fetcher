@@ -168,7 +168,10 @@ export function summarizeCurrentRatesByFamily(groups = [], currentRates = [], se
 
   return {
     gpt: summarizeIdentityRates(gptIdentityRates, {
-      keyName: gptIdentityRates.length ? "1111" : null
+      keyName: gptIdentityRates.length ? "1111" : null,
+      groupName: gptIdentityRates.length === 1
+        ? (gptIdentityRates[0].groupName || null)
+        : null
     }),
     grok: summarizeIdentityRates(grokIdentityRates, {
       keyName: grokIdentityRates.length ? "grok" : null,

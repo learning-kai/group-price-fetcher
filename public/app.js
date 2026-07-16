@@ -351,7 +351,16 @@ function openSiteDialog(site = null) {
   $("#site-id").value = site?.id ?? "";
   $("#site-name").value = site?.name ?? "";
   $("#site-url").value = site?.baseUrl ?? "";
-  $("#site-provider").value = site?.providerId ?? "uling-gateway";
+  // Provider registry no longer includes legacy ids like uling-gateway.
+  // Always pin the select to an option that actually exists, otherwise the
+  // required <select> stays empty and the Save button appears dead.
+  const availableProviderIds = new Set((state.providers || []).map((item) => item.id));
+  const preferredProvider = site?.providerId
+    || availableProviderIds.values().next().value
+    || "sub2api";
+  $("#site-provider").value = availableProviderIds.has(preferredProvider)
+    ? preferredProvider
+    : (availableProviderIds.values().next().value || "sub2api");
   $("#site-auth-mode").value = site?.authMode ?? defaultAuthMode($("#site-provider").value);
   $("#site-category").value = site?.categoryId ?? "";
   $("#site-schedule").value = site?.scheduleMinutes ?? "";

@@ -407,7 +407,21 @@ async function loginWithPassword(baseUrl, credentials, fetchImpl) {
   }
   const payload = await safeJson(response);
   if (!response.ok || payload?.code !== 0 || !payload?.data?.access_token) {
-    throw new AuthError("sub2api 账号或密码错误", { code: "LOGIN_REJECTED", status: 401 });
+    const reason = String(payload?.reason || payload?.message || "").toLowerCase();
+    if (reason.includes("turnstile") || reason.includes("captcha")) {
+      throw new AuthError(
+        "sub2api 登录需要 Turnstile/验证码，密码模式无法直登；请改用 Token 认证或在浏览器登录后导入 Token",
+        { code: "LOGIN_TURNSTILE_REQUIRED", status: 403 }
+      );
+    }
+    if (response.status === 404) {
+      throw new AuthError(
+        "sub2api 登录接口不存在（Base URL 可能错误或站点改版）",
+        { code: "LOGIN_ENDPOINT_MISSING", status: 404 }
+      );
+    }
+    const detail = payload?.message || payload?.reason || `HTTP ${response.status}`;
+    throw new AuthError(`sub2api 登录失败：${detail}`, { code: "LOGIN_REJECTED", status: response.status || 401 });
   }
   return {
     accessToken: payload.data.access_token,

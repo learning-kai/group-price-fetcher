@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fetchBatchPrices, parseTargetLines } from "../src/batch.js";
 import { EdgeAuthError, clearEdgeTokenCache, extractCandidatesFromText, resolveEdgeToken } from "../src/edgeAuth.js";
-import { deriveCurrentRates, fetchPrices, normalizeGroupRate, summarizeGroups } from "../src/providers/ulingGateway.js";
+import { deriveCurrentRates, fetchPrices, normalizeGroupRate, summarizeGroups, summarizeCurrentRatesByFamily} from "../src/providers/ulingGateway.js";
 import { toCsv } from "../src/exporters.js";
 
 test("normalizeGroupRate prefers user-specific multiplier over base multiplier", () => {
@@ -547,4 +547,24 @@ test("toCsv exports current rates when available", async () => {
 
   assert.match(csv.split("\n")[0], /^site_name,site_url,current_rate_multiplier,/);
   assert.match(csv, /A,https:\/\/a\.example\.com,0\.02,/);
+});
+
+
+test("gpt groupName is captured for exact 1111 identity", () => {
+  const groups = [
+    { groupId: "g1", groupName: "ChatGPTdefault", platform: "openai", status: "active", effectiveRateMultiplier: 0.01 },
+    { groupId: "g2", groupName: "福利Grok", platform: "grok", status: "active", effectiveRateMultiplier: 0.001 },
+  ];
+  const currentRates = [
+    { keyName: "1111", groupName: "ChatGPTdefault", currentRateMultiplier: 0.01, isActive: true },
+    { keyName: "grok", groupName: "福利Grok", currentRateMultiplier: 0.001, isActive: true },
+  ];
+  const summary = summarizeCurrentRatesByFamily(groups, currentRates, [
+    { id: 1, name: "1111" },
+    { id: 2, name: "grok" },
+  ]);
+  assert.equal(summary.gpt.currentRateKeyName, "1111");
+  assert.equal(summary.gpt.currentRateGroupName, "ChatGPTdefault");
+  assert.equal(summary.grok.currentRateKeyName, "grok");
+  assert.equal(summary.grok.currentRateGroupName, "福利Grok");
 });

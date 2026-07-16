@@ -259,6 +259,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         if (!columns.has("gpt_current_rate_ambiguous")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_ambiguous INTEGER NOT NULL DEFAULT 0");
         if (!columns.has("gpt_current_rate_count")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_count INTEGER NOT NULL DEFAULT 0");
         if (!columns.has("gpt_current_rate_key_name")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_key_name TEXT NOT NULL DEFAULT ''");
+        if (!columns.has("gpt_current_rate_group_name")) db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_group_name TEXT NOT NULL DEFAULT ''");
         if (!columns.has("grok_current_rate_multiplier")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_multiplier REAL");
         if (!columns.has("grok_current_rate_ambiguous")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_ambiguous INTEGER NOT NULL DEFAULT 0");
         if (!columns.has("grok_current_rate_count")) db.exec("ALTER TABLE sites ADD COLUMN grok_current_rate_count INTEGER NOT NULL DEFAULT 0");
@@ -328,6 +329,20 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
               grok_current_rate_key_name = ''
         `);
         db.exec("PRAGMA user_version = 11; COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
+    version = db.prepare("PRAGMA user_version").get().user_version;
+    if (version < 12) {
+      const columns = new Set(db.prepare("PRAGMA table_info(sites)").all().map((column) => column.name));
+      db.exec("BEGIN");
+      try {
+        if (!columns.has("gpt_current_rate_group_name")) {
+          db.exec("ALTER TABLE sites ADD COLUMN gpt_current_rate_group_name TEXT NOT NULL DEFAULT ''");
+        }
+        db.exec("PRAGMA user_version = 12; COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");
         throw error;
@@ -887,7 +902,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       db.prepare(`
         UPDATE sites
         SET current_rate_multiplier = ?, current_rate_ambiguous = ?, current_rate_count = ?,
-          gpt_current_rate_multiplier = ?, gpt_current_rate_ambiguous = ?, gpt_current_rate_count = ?, gpt_current_rate_key_name = ?,
+          gpt_current_rate_multiplier = ?, gpt_current_rate_ambiguous = ?, gpt_current_rate_count = ?, gpt_current_rate_key_name = ?, gpt_current_rate_group_name = ?,
           grok_current_rate_multiplier = ?, grok_current_rate_ambiguous = ?, grok_current_rate_count = ?, grok_current_rate_key_name = ?, grok_current_rate_group_name = ?,
           balance_usd = CASE WHEN ? = 'known' THEN ? ELSE balance_usd END,
           balance_updated_at = CASE WHEN ? = 'known' THEN ? ELSE balance_updated_at END,
@@ -901,6 +916,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         familyCurrent.gpt.currentRateAmbiguous ? 1 : 0,
         familyCurrent.gpt.currentRateCount,
         familyCurrent.gpt.currentRateKeyName,
+        familyCurrent.gpt.currentRateGroupName,
         familyCurrent.grok.currentRateMultiplier,
         familyCurrent.grok.currentRateAmbiguous ? 1 : 0,
         familyCurrent.grok.currentRateCount,
@@ -1022,7 +1038,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
         s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
         s.current_rate_count,
-        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name,
+        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name, s.gpt_current_rate_group_name,
         s.grok_current_rate_multiplier, s.grok_current_rate_ambiguous, s.grok_current_rate_count, s.grok_current_rate_key_name, s.grok_current_rate_group_name,
         c.name AS category_name,
         EXISTS (
@@ -1039,7 +1055,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       SELECT r.*, s.name AS site_name, s.base_url, s.auth_status,
         s.rate_conversion_factor, s.current_rate_multiplier, s.current_rate_ambiguous,
         s.current_rate_count,
-        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name,
+        s.gpt_current_rate_multiplier, s.gpt_current_rate_ambiguous, s.gpt_current_rate_count, s.gpt_current_rate_key_name, s.gpt_current_rate_group_name,
         s.grok_current_rate_multiplier, s.grok_current_rate_ambiguous, s.grok_current_rate_count, s.grok_current_rate_key_name, s.grok_current_rate_group_name,
         c.name AS category_name
       FROM rate_versions r JOIN sites s ON s.id = r.site_id LEFT JOIN categories c ON c.id = s.category_id
@@ -1434,7 +1450,8 @@ function normalizeFamilyCurrentRates(summary = {}) {
       currentRateCount: Number.isInteger(Number(gpt.currentRateCount))
         ? Math.max(0, Number(gpt.currentRateCount))
         : (byFamily.gpt ? 0 : legacy.currentRateCount),
-      currentRateKeyName: String(gpt.currentRateKeyName ?? legacy.currentRateKeyName ?? "").trim()
+      currentRateKeyName: String(gpt.currentRateKeyName ?? legacy.currentRateKeyName ?? "").trim(),
+      currentRateGroupName: String(gpt.currentRateGroupName ?? legacy.currentRateGroupName ?? "").trim()
     },
     grok: {
       currentRateMultiplier: nullableFiniteNumber(grok.currentRateMultiplier),
@@ -1481,7 +1498,7 @@ function resolveFamilyCurrentRate(row, modelFamily) {
       currentRateAmbiguous: Boolean(row.gpt_current_rate_ambiguous),
       currentRateCount: Number(row.gpt_current_rate_count ?? 0),
       currentRateKeyName: String(row.gpt_current_rate_key_name || "1111") || "1111",
-      currentRateGroupName: null
+      currentRateGroupName: String(row.gpt_current_rate_group_name || "") || null
     };
   }
   return {

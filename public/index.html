@@ -342,6 +342,43 @@
     </dialog>
 
     <div id="toast" class="toast" role="status" hidden></div>
-    <script type="module" src="./app.js"></script>
+    <script type="module" src="./app.js?v=1784299947"></script>
+
+    <dialog id="token-dialog">
+      <form id="token-form" class="dialog-form wide-dialog" method="dialog">
+        <header>
+          <div>
+            <p>TOKEN</p>
+            <h2 id="token-dialog-title">导入浏览器 Token</h2>
+          </div>
+          <button class="dialog-close" type="button" data-close="token-dialog" aria-label="关闭">×</button>
+        </header>
+        <div class="dialog-body">
+          <p id="token-dialog-help" class="muted">
+            该站有验证码，无法密码直登。请在已登录页面复制 localStorage.auth_token 后粘贴到下方。
+          </p>
+          <ol class="help-list">
+            <li>在登录页完成登录（含验证码）</li>
+            <li>F12 → Console</li>
+            <li>执行 <code>copy(localStorage.auth_token)</code></li>
+            <li>回到这里粘贴</li>
+          </ol>
+          <label>
+            auth_token（必填）
+            <textarea id="token-access-input" rows="4" placeholder="粘贴 localStorage.auth_token" required></textarea>
+          </label>
+          <label>
+            refresh_token（可选）
+            <textarea id="token-refresh-input" rows="3" placeholder="可选：粘贴 localStorage.refresh_token"></textarea>
+          </label>
+          <p id="token-dialog-error" class="form-error" hidden></p>
+        </div>
+        <footer>
+          <button class="secondary-command" type="button" data-close="token-dialog">取消</button>
+          <button class="primary-command" type="submit">保存并采集</button>
+        </footer>
+      </form>
+    </dialog>
+
   </body>
 </html>

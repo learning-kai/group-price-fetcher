@@ -249,7 +249,7 @@ test("test send records a log without config values", async () => {
   } finally { await f.cleanup(); }
 });
 
-test("dispatch batches rate and group changes per destination without cooldown suppression", async () => {
+test("dispatch batches eligible rate changes while membership changes await confirmation", async () => {
   const payloads = [];
   let now = new Date("2026-07-14T00:00:00.000Z");
   const f = await fixture({
@@ -274,7 +274,7 @@ test("dispatch batches rate and group changes per destination without cooldown s
     ];
     assert.equal((await f.service.dispatchCollectionChanges(changes)).sent, 1);
     assert.equal(payloads.length, 1);
-    assert.deepEqual(payloads[0].changes.map((change) => change.changeType), ["ratio_changed", "group_added"]);
+    assert.deepEqual(payloads[0].changes.map((change) => change.changeType), ["ratio_changed"]);
     assert.equal((await f.service.dispatchCollectionChanges(changes)).sent, 1);
     assert.equal(payloads.length, 2);
   } finally { await f.cleanup(); }

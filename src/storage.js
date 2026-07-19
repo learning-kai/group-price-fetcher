@@ -426,6 +426,19 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       );
       const id = Number(result.lastInsertRowid);
       replaceSiteTags(id, input.tags ?? []);
+      // Auto-subscribe new sites to all notification channels so auth/collection failures are not silent.
+      const channels = db.prepare("SELECT id, subscriptions FROM notification_channels").all();
+      for (const channel of channels) {
+        let subs = [];
+        try { subs = JSON.parse(channel.subscriptions || "[]"); } catch { subs = []; }
+        if (!Array.isArray(subs)) subs = [];
+        if (!subs.includes(id)) {
+          subs.push(id);
+          subs = [...new Set(subs.map(Number).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b);
+          db.prepare("UPDATE notification_channels SET subscriptions = ?, updated_at = ? WHERE id = ?")
+            .run(JSON.stringify(subs), now, channel.id);
+        }
+      }
       db.exec("COMMIT");
       return getSite(id);
     } catch (error) {
@@ -474,7 +487,11 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
 
   function getSite(id) {
     const row = db.prepare(siteSelect("WHERE s.id = ?")).get(id);
-    return row ? mapSite(row) : null;
+    if (!row) return null;
+    const relayUsage = loadRelayUsageBySite(3600);
+    const folded = Object.fromEntries(Object.entries(relayUsage.sites || {}).map(([k, v]) => [String(k).toLowerCase(), v]));
+    const usage = relayUsage.sites[row.name] || folded[String(row.name || "").toLowerCase()] || null;
+    return mapSite(row, usage);
   }
 
   function getSiteByBaseUrl(baseUrl) {
@@ -483,7 +500,12 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
   }
 
   function exportTransferSites() {
-    return db.prepare(`${siteSelect()} ORDER BY s.name COLLATE NOCASE, s.id ASC`).all().map(mapSite);
+    const relayUsage = loadRelayUsageBySite(3600);
+    const folded = Object.fromEntries(Object.entries(relayUsage.sites || {}).map(([k, v]) => [String(k).toLowerCase(), v]));
+    return db.prepare(`${siteSelect()} ORDER BY s.name COLLATE NOCASE, s.id ASC`).all().map((row) => {
+      const usage = relayUsage.sites[row.name] || folded[String(row.name || "").toLowerCase()] || null;
+      return mapSite(row, usage);
+    });
   }
 
   function listSites(options = {}) {
@@ -516,10 +538,24 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     }
     const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const total = Number(db.prepare(`SELECT COUNT(*) AS count FROM sites s ${clause}`).get(...params).count);
+    const relayUsage = loadRelayUsageBySite(3600);
     const rows = db.prepare(`${siteSelect(clause)} ORDER BY ${sort} ${direction}, s.id ASC LIMIT ? OFFSET ?`)
       .all(...params, pageSize, (page - 1) * pageSize)
-      .map(mapSite);
-    return { items: rows, total, page, pageSize };
+      .map((row) => mapSite(row, relayUsage.sites[row.name] || relayUsage.sites[String(row.name || "")] || null));
+    // case-insensitive fallback attach
+    if (relayUsage.sites && Object.keys(relayUsage.sites).length) {
+      const folded = Object.fromEntries(Object.entries(relayUsage.sites).map(([k, v]) => [String(k).toLowerCase(), v]));
+      for (const item of rows) {
+        if (!item.usedInRelayLastHour) {
+          const hit = relayUsage.sites[item.name] || folded[String(item.name || "").toLowerCase()];
+          if (hit) {
+            item.usedInRelayLastHour = true;
+            item.relayUsageLastHour = hit;
+          }
+        }
+      }
+    }
+    return { items: rows, total, page, pageSize, relayUsageMeta: { windowSeconds: relayUsage.windowSeconds, generatedAt: relayUsage.generatedAt, error: relayUsage.error } };
   }
 
   function deleteSite(id) {
@@ -812,6 +848,21 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     try {
       db.exec("BEGIN IMMEDIATE");
       const hadBaseline = Boolean(db.prepare("SELECT 1 FROM rate_versions WHERE site_id = ? LIMIT 1").get(siteId));
+      // Incomplete snapshot protection:
+      // if a site previously had many open groups but this collection returns a much smaller set,
+      // treat it as a partial/unstable response. Still upsert present groups, but do NOT close
+      // missing groups or emit group_removed (avoids false "delete all / add all" notification flaps).
+      const openBefore = db.prepare(
+        "SELECT group_id FROM rate_versions WHERE site_id = ? AND valid_to IS NULL"
+      ).all(siteId);
+      const previousOpenCount = openBefore.length;
+      const incomingCount = result.groups.length;
+      const incompleteSnapshot = Boolean(
+        hadBaseline
+        && previousOpenCount >= 3
+        && incomingCount > 0
+        && incomingCount < Math.max(2, Math.ceil(previousOpenCount * 0.5))
+      );
       for (const group of result.groups) {
         const groupId = String(group.groupId);
         seen.add(groupId);
@@ -824,7 +875,9 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         if (hadBaseline) {
           const rateChanges = current
             ? diffRates(rateFromRow(current), normalized)
-            : [{ changeType: "group_added", oldValue: null, newValue: publicRateSnapshot(normalized) }];
+            : (incompleteSnapshot
+              ? [] // don't announce brand-new groups from incomplete/partial snapshots
+              : [{ changeType: "group_added", oldValue: null, newValue: publicRateSnapshot(normalized) }]);
           for (const change of rateChanges) {
             changes.push(insertChange({
               siteId,
@@ -876,6 +929,8 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
       const currentGroups = db.prepare("SELECT * FROM rate_versions WHERE site_id = ? AND valid_to IS NULL").all(siteId);
       for (const current of currentGroups) {
         if (!seen.has(current.group_id)) {
+          // Keep previous groups when the incoming snapshot looks incomplete.
+          if (incompleteSnapshot) continue;
           db.prepare("UPDATE rate_versions SET valid_to = ? WHERE id = ?").run(collectedAt, current.id);
           if (hadBaseline) {
             changes.push(insertChange({
@@ -933,7 +988,14 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         siteId
       );
       db.exec("COMMIT");
-      return { insertedVersions, groupCount: result.groups.length, changeCount, changes };
+      return {
+        insertedVersions,
+        groupCount: result.groups.length,
+        changeCount,
+        changes,
+        incompleteSnapshot,
+        previousOpenCount,
+      };
     } catch (error) {
       rollback();
       throw error;
@@ -1047,7 +1109,25 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
         ) AS is_hidden
       ${base} ORDER BY ${sort} ${direction}, r.id ASC LIMIT ? OFFSET ?
     `).all(...params, pageSize, (page - 1) * pageSize).map(mapRate);
-    return { items, total, page, pageSize };
+    const relayUsage = loadRelayUsageBySite(3600);
+    const groupMap = relayUsage.groups || {};
+    const groupFolded = {};
+    for (const [k, v] of Object.entries(groupMap)) {
+      const nul = String.fromCharCode(0);
+      const idx = k.indexOf(nul);
+      const site = idx >= 0 ? k.slice(0, idx) : k;
+      const group = idx >= 0 ? k.slice(idx + 1) : "";
+      groupFolded[String(site).toLowerCase() + nul + group] = v;
+    }
+    for (const item of items) {
+      const nul = String.fromCharCode(0);
+      const exactKey = String(item.siteName || "") + nul + String(item.groupName || "");
+      const foldKey = String(item.siteName || "").toLowerCase() + nul + String(item.groupName || "");
+      const usage = groupMap[exactKey] || groupFolded[foldKey] || null;
+      item.usedInRelayLastHour = Boolean(usage);
+      item.relayUsageLastHour = usage;
+    }
+    return { items, total, page, pageSize, relayUsageMeta: { windowSeconds: relayUsage.windowSeconds, generatedAt: relayUsage.generatedAt, error: relayUsage.error } };
   }
 
   function getRateHistory(siteId, groupId, limit = 200) {
@@ -1148,6 +1228,7 @@ export function createRepository({ dbPath = ":memory:", clock = () => new Date()
     getSiteByBaseUrl,
     exportTransferSites,
     listSites,
+    getRelayUsageLastHour: () => loadRelayUsageBySite(3600),
     deleteSite,
     setGlobalSchedule,
     getGlobalSchedule,
@@ -1307,7 +1388,183 @@ function mapCategory(row) {
   };
 }
 
-function mapSite(row) {
+
+function channelSiteAliases() {
+  return {
+    "波吉": "新波吉",
+    "波吉grok": "新波吉",
+    "unigrok": "uni",
+    "uni grok": "uni",
+    "ooc": "OOC"
+  };
+}
+
+function resolveRelaySiteName(channelName) {
+  const text = String(channelName || "").trim();
+  if (!text) return "";
+  const aliases = channelSiteAliases();
+  if (Object.prototype.hasOwnProperty.call(aliases, text)) return aliases[text];
+  const folded = Object.fromEntries(Object.entries(aliases).map(([k, v]) => [k.toLowerCase(), v]));
+  if (Object.prototype.hasOwnProperty.call(folded, text.toLowerCase())) return folded[text.toLowerCase()];
+  for (const suffix of ["grok", "Grok", "GROK", "-grok", "_grok", " grok"]) {
+    if (text.endsWith(suffix)) {
+      const base = text.slice(0, -suffix.length).replace(/[ \-_]+$/g, "");
+      if (!base) continue;
+      if (Object.prototype.hasOwnProperty.call(aliases, base)) return aliases[base];
+      if (Object.prototype.hasOwnProperty.call(folded, base.toLowerCase())) return folded[base.toLowerCase()];
+      return base;
+    }
+  }
+  return text;
+}
+
+function loadRelayUsageBySite(windowSeconds = 3600) {
+  const windowSec = Math.max(60, Number(windowSeconds) || 3600);
+  const nowMs = Date.now();
+  if (
+    loadRelayUsageBySite._cache &&
+    loadRelayUsageBySite._cache.version === 4 &&
+    loadRelayUsageBySite._cache.windowSeconds === windowSec &&
+    nowMs - loadRelayUsageBySite._cache.loadedAt < 30000
+  ) {
+    return loadRelayUsageBySite._cache.payload;
+  }
+
+  const dbPath = process.env.NEWAPI_DB_PATH || "/opt/new-api/data/one-api.db";
+  const since = Math.floor(nowMs / 1000) - windowSec;
+  const bySite = new Map();
+  const byGroup = new Map(); // key: siteName + NUL + groupName
+  let db;
+  let error = null;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    try { db.exec("PRAGMA busy_timeout = 5000"); } catch {}
+    // Exclude channel-panel/manual tests (token_name/content = 模型测试).
+    // Group identity comes from the channel billing snapshot written by priority sync.
+    const rows = db.prepare(`
+      SELECT c.name AS channel_name,
+             c.other_info AS channel_other_info,
+             COUNT(*) AS request_count,
+             SUM(CASE WHEN l.type = 2 THEN 1 ELSE 0 END) AS success_count,
+             SUM(CASE WHEN l.type = 5 THEN 1 ELSE 0 END) AS failure_count,
+             MAX(l.created_at) AS last_used_at
+      FROM logs l
+      JOIN channels c ON c.id = l.channel_id
+      WHERE l.created_at >= ?
+        AND l.type IN (2, 5)
+        AND l.channel_id IS NOT NULL
+        AND COALESCE(TRIM(l.token_name), '') != ''
+        AND COALESCE(l.token_name, '') != '模型测试'
+        AND COALESCE(l.content, '') != '模型测试'
+        AND COALESCE(l.token_name, '') NOT LIKE '%测试%'
+        AND LOWER(COALESCE(l.token_name, '')) NOT LIKE '%test%'
+        AND LOWER(COALESCE(l.token_name, '')) NOT LIKE '%probe%'
+        AND COALESCE(l.content, '') NOT LIKE '%渠道测试%'
+        AND COALESCE(l.content, '') NOT LIKE '%测试渠道%'
+        AND COALESCE(l.content, '') NOT LIKE '%模型测试%'
+        AND LOWER(COALESCE(l.content, '')) NOT LIKE '%channel test%'
+      GROUP BY c.name, c.other_info
+    `).all(since);
+
+    for (const row of rows) {
+      const siteName = resolveRelaySiteName(row.channel_name);
+      if (!siteName) continue;
+      let groupName = "";
+      let rateMultiplier = null;
+      try {
+        const other = JSON.parse(row.channel_other_info || "{}");
+        const billing = other?.channel_aware_billing || {};
+        groupName = String(billing.upstream_rate_group_name || "").trim();
+        const rate = Number(billing.upstream_rate_multiplier);
+        rateMultiplier = Number.isFinite(rate) ? rate : null;
+      } catch {
+        groupName = "";
+        rateMultiplier = null;
+      }
+
+      const req = Number(row.request_count || 0);
+      const ok = Number(row.success_count || 0);
+      const fail = Number(row.failure_count || 0);
+      const lastUsedAt = row.last_used_at ? new Date(Number(row.last_used_at) * 1000).toISOString() : null;
+
+      const sitePrev = bySite.get(siteName) || {
+        siteName,
+        usedInRelayLastHour: true,
+        requestCount: 0,
+        successCount: 0,
+        failureCount: 0,
+        lastUsedAt: null,
+        channels: [],
+        groups: []
+      };
+      sitePrev.requestCount += req;
+      sitePrev.successCount += ok;
+      sitePrev.failureCount += fail;
+      if (!sitePrev.lastUsedAt || (lastUsedAt && lastUsedAt > sitePrev.lastUsedAt)) sitePrev.lastUsedAt = lastUsedAt;
+      sitePrev.channels.push({
+        channelName: row.channel_name,
+        groupName,
+        rateMultiplier,
+        requestCount: req,
+        successCount: ok,
+        failureCount: fail,
+        lastUsedAt
+      });
+      bySite.set(siteName, sitePrev);
+
+      if (groupName) {
+        const gkey = siteName + String.fromCharCode(0) + groupName;
+        const gPrev = byGroup.get(gkey) || {
+          siteName,
+          groupName,
+          usedInRelayLastHour: true,
+          requestCount: 0,
+          successCount: 0,
+          failureCount: 0,
+          lastUsedAt: null,
+          rateMultiplier,
+          channels: []
+        };
+        gPrev.requestCount += req;
+        gPrev.successCount += ok;
+        gPrev.failureCount += fail;
+        if (rateMultiplier != null) gPrev.rateMultiplier = rateMultiplier;
+        if (!gPrev.lastUsedAt || (lastUsedAt && lastUsedAt > gPrev.lastUsedAt)) gPrev.lastUsedAt = lastUsedAt;
+        gPrev.channels.push({
+          channelName: row.channel_name,
+          requestCount: req,
+          successCount: ok,
+          failureCount: fail,
+          lastUsedAt
+        });
+        byGroup.set(gkey, gPrev);
+      }
+    }
+
+    for (const [siteName, site] of bySite.entries()) {
+      site.groups = [...byGroup.values()].filter((g) => g.siteName === siteName);
+    }
+  } catch (err) {
+    error = String(err && err.message ? err.message : err);
+  } finally {
+    try { db?.close(); } catch {}
+  }
+
+  const groups = {};
+  for (const [k, v] of byGroup.entries()) groups[k] = v;
+
+  const payload = {
+    windowSeconds: windowSec,
+    since,
+    generatedAt: new Date().toISOString(),
+    sites: Object.fromEntries(bySite.entries()),
+    groups,
+    error
+  };
+  loadRelayUsageBySite._cache = { version: 4, windowSeconds: windowSec, loadedAt: nowMs, payload };
+  return payload;
+}
+function mapSite(row, relayUsage = null) {
   const sourceCurrentRateMultiplier = nullableFiniteNumber(row.current_rate_multiplier);
   const rateConversionFactor = Number(row.rate_conversion_factor ?? 1);
   return {
@@ -1325,6 +1582,20 @@ function mapSite(row) {
       : convertRate(sourceCurrentRateMultiplier, rateConversionFactor),
     currentRateAmbiguous: Boolean(row.current_rate_ambiguous),
     currentRateCount: Number(row.current_rate_count ?? 0),
+    gptCurrentRateMultiplier: nullableFiniteNumber(row.gpt_current_rate_multiplier) === null
+      ? null
+      : convertRate(row.gpt_current_rate_multiplier, rateConversionFactor),
+    gptCurrentRateAmbiguous: Boolean(row.gpt_current_rate_ambiguous),
+    gptCurrentRateCount: Number(row.gpt_current_rate_count ?? 0),
+    gptCurrentRateKeyName: row.gpt_current_rate_key_name || "",
+    gptCurrentRateGroupName: row.gpt_current_rate_group_name || "",
+    grokCurrentRateMultiplier: nullableFiniteNumber(row.grok_current_rate_multiplier) === null
+      ? null
+      : convertRate(row.grok_current_rate_multiplier, rateConversionFactor),
+    grokCurrentRateAmbiguous: Boolean(row.grok_current_rate_ambiguous),
+    grokCurrentRateCount: Number(row.grok_current_rate_count ?? 0),
+    grokCurrentRateKeyName: row.grok_current_rate_key_name || "",
+    grokCurrentRateGroupName: row.grok_current_rate_group_name || "",
     balanceUsd: nullableFiniteNumber(row.balance_usd),
     balanceStatus: row.balance_status ?? "unknown",
     balanceSource: row.balance_source ?? "",

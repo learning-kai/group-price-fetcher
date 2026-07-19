@@ -202,8 +202,8 @@ function renderRates() {
     body.innerHTML = '<tr class="empty"><td colspan="9">没有符合条件的倍率记录</td></tr>';
   } else {
     body.innerHTML = items.map((rate) => `
-      <tr>
-        <td><div class="primary-cell"><strong>${escapeHtml(rate.siteName)}</strong><span>${escapeHtml(hostname(rate.baseUrl))}</span></div></td>
+      <tr class="${rate.usedInRelayLastHour ? "row-used-relay" : ""}">
+        <td><div class="primary-cell"><strong class="${rate.usedInRelayLastHour ? "used-relay-name" : ""}">${escapeHtml(rate.siteName)}</strong>${rate.usedInRelayLastHour ? badge("近1h实际使用", "danger") : ""}<span>${escapeHtml(hostname(rate.baseUrl))}</span></div></td>
         <td>${rate.categoryName ? badge(rate.categoryName, "neutral") : '<span class="muted">未分类</span>'}</td>
         <td><div class="primary-cell"><strong>${escapeHtml(rate.groupName)}</strong><span>${escapeHtml(rate.platform || "未标记平台")} · ${badge(modelFamilyLabel(rate.modelFamily), rate.modelFamily === "grok" ? "accent" : "neutral")}</span></div></td>
         <td>${statusBadge(rate.status || "active")}</td>
@@ -256,11 +256,90 @@ async function loadSites() {
   }
 }
 
+function promptTokenDialog({ title = "导入浏览器 Token", help = "" } = {}) {
+  const dialog = document.getElementById("token-dialog");
+  const form = document.getElementById("token-form");
+  const titleEl = document.getElementById("token-dialog-title");
+  const helpEl = document.getElementById("token-dialog-help");
+  const accessInput = document.getElementById("token-access-input");
+  const refreshInput = document.getElementById("token-refresh-input");
+  const errorEl = document.getElementById("token-dialog-error");
+  if (!dialog || !form || !accessInput) {
+    showToast("页面未加载 Token 导入框，请强刷后再试");
+    return Promise.resolve(null);
+  }
+  if (titleEl) titleEl.textContent = title;
+  if (helpEl && help) helpEl.textContent = help;
+  accessInput.value = "";
+  if (refreshInput) refreshInput.value = "";
+  if (errorEl) {
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let accepted = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      const accessToken = String(accessInput.value || "").trim().replace(/^Bearer\s+/i, "");
+      const refreshToken = String(refreshInput?.value || "").trim();
+      if (!accessToken) {
+        if (errorEl) {
+          errorEl.hidden = false;
+          errorEl.textContent = "auth_token 不能为空";
+        }
+        accessInput.focus();
+        return;
+      }
+      accepted = { accessToken, refreshToken };
+      if (typeof dialog.close === "function") dialog.close("submit");
+      else finish(accepted);
+    };
+    const onDialogClose = () => {
+      // submit sets accepted first; cancel/ESC leaves it null
+      finish(accepted);
+    };
+    const onCancelClick = (event) => {
+      const btn = event.target.closest("[data-close='token-dialog']");
+      if (!btn) return;
+      event.preventDefault();
+      accepted = null;
+      if (typeof dialog.close === "function") dialog.close("cancel");
+      else finish(null);
+    };
+    function cleanup() {
+      form.removeEventListener("submit", onSubmit);
+      dialog.removeEventListener("close", onDialogClose);
+      dialog.removeEventListener("click", onCancelClick);
+    }
+    form.addEventListener("submit", onSubmit);
+    dialog.addEventListener("close", onDialogClose);
+    dialog.addEventListener("click", onCancelClick);
+    try {
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "true");
+    } catch (error) {
+      cleanup();
+      showToast(`无法打开导入框：${error.message || error}`);
+      resolve(null);
+      return;
+    }
+    setTimeout(() => accessInput.focus(), 0);
+  });
+}
+
 function renderSites() {
   $("#sites-body").innerHTML = state.sites.items.length
     ? state.sites.items.map((site) => `
       <tr>
-        <td><div class="primary-cell"><strong>${escapeHtml(site.name)}</strong><span title="${escapeAttr(site.baseUrl)}">${escapeHtml(site.baseUrl)}</span></div></td>
+        <td><div class="primary-cell"><strong>${escapeHtml(site.name)}</strong>${site.usedInRelayLastHour ? badge("近1h有流量", "info") : ""}<span title="${escapeAttr(site.baseUrl)}">${escapeHtml(site.baseUrl)}</span></div></td>
         <td><div class="tag-stack">${site.categoryName ? badge(site.categoryName, "neutral") : ""}${site.tags.map((tag) => badge(tag)).join("") || '<span class="muted">无标签</span>'}</div></td>
         <td>${authBadge(site.authStatus)}<span class="override-note">${escapeHtml(authModeLabel(site.authMode))}${site.authUsername ? ` · ${escapeHtml(site.authUsername)}` : ""}</span></td>
         <td>${balanceCell(site)}</td>
@@ -269,7 +348,7 @@ function renderSites() {
         <td class="time-cell">${formatDate(site.lastCollectedAt)}</td>
         <td class="row-actions site-actions">
           <button type="button" data-action="refresh" data-id="${site.id}" title="立即刷新">↻</button>
-          ${site.authMode === "edge-profile" ? `<button type="button" data-action="login" data-id="${site.id}">登录</button><button type="button" data-action="import-edge" data-id="${site.id}">导入</button>` : site.authMode !== "public" ? `<button type="button" data-action="login" data-id="${site.id}">验证</button>` : ""}
+          ${site.authMode === "edge-profile" ? `<button type="button" data-action="login" data-id="${site.id}">登录</button><button type="button" data-action="import-edge" data-id="${site.id}">导入</button><button type="button" data-action="auto-login-token" data-id="${site.id}" data-base-url="${escapeHtml(site.baseUrl || "")}" data-provider-id="${escapeHtml(site.providerId || "")}">自动跳转取Token</button>` : (site.authMode === "sub2api-token" || site.authMode === "auto" || site.providerId === "sub2api") ? `<button type="button" data-action="login" data-id="${site.id}">验证</button><button type="button" data-action="auto-login-token" data-id="${site.id}" data-base-url="${escapeHtml(site.baseUrl || "")}" data-provider-id="${escapeHtml(site.providerId || "")}">自动跳转取Token</button>` : site.authMode !== "public" ? `<button type="button" data-action="login" data-id="${site.id}">验证</button>` : ""}
           <button type="button" data-action="changes" data-id="${site.id}">变化</button>
           <button type="button" data-action="edit" data-id="${site.id}">编辑</button>
           <button class="danger" type="button" data-action="delete" data-id="${site.id}" title="删除站点">×</button>
@@ -306,8 +385,102 @@ async function handleSiteAction(event) {
     await Promise.all([loadSites(), loadRates(), loadReferenceData()]);
     return;
   }
+  if (action === "auto-login-token") {
+    const site = (state.sites?.items || []).find((item) => String(item.id) === String(id));
+    const target = safeExternalUrl(
+      button.dataset.baseUrl || site?.baseUrl || "",
+      button.dataset.providerId || site?.providerId || ""
+    );
+    if (!target) throw new Error("站点地址无效，无法跳转");
+
+    // uni 等站 token 与网络指纹绑定：必须在 Windows Edge 同出口登录，不能拿手机/其他网络浏览器 token 粘贴。
+    const useWindowsEdge = ["sub2api", "sub2api-token", "edge-profile", "auto"].includes(String(site?.authMode || site?.providerId || ""));
+    if (useWindowsEdge) {
+      showToast("正在新开一个专用 Edge 登录窗（不会关闭你现有 Edge）。请在新窗口登录；主 Edge 请保持开着");
+      button.disabled = true;
+      button.classList.add("loading");
+      try {
+        const result = await api(`/api/sites/${id}/auto-login-token`, {
+          method: "POST",
+          body: { openEdge: true, pollSeconds: 180 }
+        });
+        showToast(result?.message || "Token 已更新，开始采集…");
+        try {
+          await api(`/api/sites/${id}/refresh`, { method: "POST" });
+          showToast("登录完成，采集成功");
+        } catch (error) {
+          showToast(`Token 已保存，但采集失败：${error.message || error}`);
+        }
+        await Promise.all([loadSites(), loadRates()]);
+      } catch (error) {
+        // fallback: allow paste, but warn about binding
+        showToast(`Windows Edge 自动提取失败：${error.message || error}`);
+        const pasted = await promptTokenDialog({
+          title: `导入 ${site?.name || "站点"} Token（需同出口）`,
+          help: "若自动提取失败，请在【刚弹出的专用 Edge 登录窗】登录后复制 token。不要用手机/其他网络浏览器 token。"
+        });
+        if (!pasted) {
+          showToast("已取消导入 Token");
+          return;
+        }
+        const imported = await api(`/api/sites/${id}/import-browser-token`, {
+          method: "POST",
+          body: {
+            accessToken: pasted.accessToken,
+            refreshToken: pasted.refreshToken || ""
+          }
+        });
+        showToast(imported?.message || "Token 已校验并保存，开始采集…");
+        try {
+          await api(`/api/sites/${id}/refresh`, { method: "POST" });
+          showToast("登录完成，采集成功");
+        } catch (err2) {
+          showToast(`Token 已保存，但采集失败：${err2.message || err2}`);
+        }
+        await Promise.all([loadSites(), loadRates()]);
+      } finally {
+        button.disabled = false;
+        button.classList.remove("loading");
+      }
+      return;
+    }
+
+    // non-binding sites: paste dialog
+    const pasted = await promptTokenDialog({
+      title: `导入 ${site?.name || "站点"} Token`,
+      help: "请粘贴登录页 localStorage.auth_token。"
+    });
+    if (!pasted) {
+      showToast("已取消导入 Token");
+      return;
+    }
+    window.open(target, "_blank", "noopener,noreferrer");
+    button.disabled = true;
+    button.classList.add("loading");
+    try {
+      const imported = await api(`/api/sites/${id}/import-browser-token`, {
+        method: "POST",
+        body: {
+          accessToken: pasted.accessToken,
+          refreshToken: pasted.refreshToken || ""
+        }
+      });
+      showToast(imported?.message || "Token 已校验并保存，开始采集…");
+      try {
+        await api(`/api/sites/${id}/refresh`, { method: "POST" });
+        showToast("登录完成，采集成功");
+      } catch (error) {
+        showToast(`Token 已保存，但采集失败：${error.message || error}`);
+      }
+      await Promise.all([loadSites(), loadRates()]);
+    } finally {
+      button.disabled = false;
+      button.classList.remove("loading");
+    }
+    return;
+  }
   const endpoints = { refresh: "/refresh", login: "/login", "import-edge": "/import-edge" };
-  await withButton(button, () => api(`/api/sites/${id}${endpoints[action]}`, { method: "POST" }));
+  const result = await withButton(button, () => api(`/api/sites/${id}${endpoints[action]}`, { method: "POST" }));
   showToast(action === "refresh" ? "采集完成" : action === "login" ? "登录态已保存" : "Edge 登录态已导入");
   await Promise.all([loadSites(), loadRates()]);
 }

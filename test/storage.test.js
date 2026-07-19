@@ -94,7 +94,7 @@ test("v9 migration adds notification storage and maps site balance thresholds", 
 
     const raw = new DatabaseSync(fixture.dbPath, { readOnly: true });
     try {
-      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 11);
+      assert.equal(raw.prepare("PRAGMA user_version").get().user_version, 12);
       for (const table of ["notification_channels", "notification_logs", "notification_cooldowns"]) {
         assert.equal(raw.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type = 'table' AND name = ?").get(table).count, 1);
       }
@@ -174,7 +174,7 @@ test("v4 through v6 migrations preserve legacy data and add site conversion", as
 
     const verification = new DatabaseSync(dbPath);
     try {
-      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 11);
+      assert.equal(verification.prepare("PRAGMA user_version").get().user_version, 12);
       assert.equal(
         verification.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'hidden_rate_groups'").get().count,
         1
@@ -621,6 +621,47 @@ test("collections record explicit changes after suppressing the initial baseline
     assert.equal(unchanged.changeCount, 0);
     assert.deepEqual(unchanged.changes, []);
     assert.equal(fixture.repo.listChanges({ siteId: site.id }).total, 11);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("incomplete group snapshots do not emit membership churn or close existing groups", async () => {
+  const fixture = await createFixture();
+  try {
+    const site = fixture.repo.createSite({
+      name: "抖动站",
+      baseUrl: "https://jitter.example.com",
+      providerId: "sub2api"
+    });
+    const baseline = collectionWithGroups([
+      detailedGroup("g1", { rate: 0.01, groupName: "ChatGPTdefault" }),
+      detailedGroup("g2", { rate: 0.01, groupName: "Claudedefault" }),
+      detailedGroup("g3", { rate: 0.01, groupName: "Geminidefault" }),
+      detailedGroup("g4", { rate: 0.01, groupName: "Grokdefault" }),
+      detailedGroup("g5", { rate: 0.01, groupName: "Claudekirodefault" })
+    ]);
+    const first = fixture.repo.saveCollection(site.id, baseline, "2026-07-18T09:30:00.000Z");
+    assert.equal(first.groupCount, 5);
+    assert.equal(first.changeCount, 0);
+
+    // Sparse/partial response that previously caused false delete-all + add-1111 notifications.
+    const partial = fixture.repo.saveCollection(site.id, collectionWithGroups([
+      detailedGroup("1111", { rate: 0.01, groupName: "1111" })
+    ]), "2026-07-18T09:31:00.000Z");
+    assert.equal(partial.incompleteSnapshot, true);
+    assert.equal(partial.changeCount, 0);
+    assert.deepEqual(partial.changes, []);
+    assert.equal(fixture.repo.listChanges({ siteId: site.id }).total, 0);
+
+    // Existing groups remain open/latest.
+    const latest = fixture.repo.listLatestRates({ siteId: site.id, pageSize: 50 }).items;
+    const names = latest.map((item) => item.groupName).sort();
+    assert.ok(names.includes("ChatGPTdefault"));
+    assert.ok(names.includes("Claudedefault"));
+    assert.ok(names.includes("Geminidefault"));
+    assert.ok(names.includes("Grokdefault"));
+    assert.ok(names.includes("Claudekirodefault"));
   } finally {
     await fixture.cleanup();
   }

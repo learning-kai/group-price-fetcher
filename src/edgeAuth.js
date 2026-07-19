@@ -178,6 +178,12 @@ export function extractCandidatesFromText(text, origin, keyName) {
 }
 
 function candidateKeyNames(keyName) {
+  if (keyName === "auth_token") {
+    return ["auth_token", "access_token", "token", "uth_token", "ccess_token"];
+  }
+  if (keyName === "refresh_token") {
+    return ["refresh_token", "efresh_token"];
+  }
   return keyName.length > 1 ? [keyName, keyName.slice(1)] : [keyName];
 }
 
@@ -301,14 +307,46 @@ async function refreshAccessToken(origin, refreshToken, fetchImpl = globalThis.f
 
 async function openEdgeForOrigin(origin, options = {}) {
   const executable = options.edgeExecutable || findEdgeExecutable();
-  if (!executable) return false;
-
   const targetUrl = new URL("/keys", origin).toString();
+
+  // Prefer shell "start" on Windows so it opens a visible new tab/window.
+  if (process.platform === "win32") {
+    const attempts = [];
+    if (executable) {
+      attempts.push({
+        cmd: executable,
+        args: ["--new-window", targetUrl]
+      });
+      attempts.push({
+        cmd: executable,
+        args: [targetUrl]
+      });
+    }
+    attempts.push({
+      cmd: "cmd.exe",
+      args: ["/c", "start", "", targetUrl]
+    });
+    for (const attempt of attempts) {
+      try {
+        const child = spawn(attempt.cmd, attempt.args, {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true
+        });
+        child.unref();
+        return true;
+      } catch {
+        // try next strategy
+      }
+    }
+    return false;
+  }
+
+  if (!executable) return false;
   try {
     const child = spawn(executable, [targetUrl], {
       detached: true,
-      stdio: "ignore",
-      windowsHide: true
+      stdio: "ignore"
     });
     child.unref();
     return true;

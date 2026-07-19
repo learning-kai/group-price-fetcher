@@ -130,6 +130,10 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
     if (pathname === "/api/tags" && method === "GET") {
       return ok({ items: repository.listTags() });
     }
+    if (method === "GET" && pathname === "/api/relay-usage") {
+      return ok(repository.getRelayUsageLastHour());
+    }
+
     if (pathname === "/api/sites") {
       if (method === "GET") {
         const result = repository.listSites(siteQuery(url.searchParams));
@@ -186,6 +190,20 @@ export function createApiRouter({ repository, collector, authManager, scheduler,
           ? await collector.probeSite(site, { token: result.token })
           : null;
         return ok({ source: result.source, compatibility });
+      }
+      if (parts.length === 4 && method === "POST" && parts[3] === "auto-login-token") {
+        console.error("[route] auto-login-token hit", { id: site?.id, name: site?.name, body });
+        try {
+          const result = await authManager.autoLoginAndCaptureToken(site, body || {});
+          console.error("[route] auto-login-token done", result?.ok, result?.message || result?.error);
+          return ok(result);
+        } catch (error) {
+          console.error("[route] auto-login-token error", error?.message || error);
+          throw error;
+        }
+      }
+      if (parts.length === 4 && method === "POST" && parts[3] === "import-browser-token") {
+        return ok(await authManager.importBrowserToken(site, body || {}));
       }
       if (parts.length === 4 && method === "POST" && parts[3] === "capture-browser-session") {
         if (!browserAuthSupported) {

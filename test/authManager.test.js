@@ -185,11 +185,57 @@ test("sub2api password mode logs in and keeps returned tokens in memory", async 
 
   assert.deepEqual(first, { token: "password-access", headers: {}, source: "password:login" });
   assert.deepEqual(second, { token: "password-access", headers: {}, source: "password:cache" });
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /\/api\/v1\/auth\/login$/);
-  assert.deepEqual(JSON.parse(calls[0].init.body), { email: "user@example.com", password: "plain-secret" });
+  const loginCalls = calls.filter((c) => String(c.url).includes("/api/v1/auth/login"));
+  assert.equal(loginCalls.length, 1);
+  assert.match(loginCalls[0].url, /\/api\/v1\/auth\/login$/);
+  assert.deepEqual(JSON.parse(loginCalls[0].init.body), { email: "user@example.com", password: "plain-secret" });
   assert.equal(JSON.stringify(statuses).includes("plain-secret"), false);
   assert.equal(JSON.stringify(statuses).includes("password-access"), false);
+});
+
+test("sub2api password login includes login_agreement_revision when required", async () => {
+  const calls = [];
+  const manager = createAuthManager({
+    repository: fakeRepository([]),
+    credentialStore: { async get() { return { email: "user@example.com", password: "plain-secret" }; } },
+    browserAdapter: fakeBrowser({}),
+    fetchImpl: async (url, init = {}) => {
+      const path = new URL(String(url)).pathname;
+      calls.push({ path, body: init.body ? JSON.parse(init.body) : null });
+      if (path.endsWith("/api/v1/settings/public")) {
+        return jsonResponse(200, {
+          code: 0,
+          data: {
+            login_agreement_enabled: true,
+            login_agreement_revision: "rev-123",
+            login_agreement_documents: [{ id: "tos", title: "服务条款" }]
+          }
+        });
+      }
+      if (path.endsWith("/api/v1/auth/login")) {
+        const body = init.body ? JSON.parse(init.body) : {};
+        if (body.login_agreement_revision !== "rev-123") {
+          return jsonResponse(403, {
+            code: 403,
+            message: "please read and accept the latest login agreement before signing in",
+            reason: "LOGIN_AGREEMENT_REQUIRED"
+          });
+        }
+        return jsonResponse(200, {
+          code: 0,
+          data: { access_token: "agreed-access", refresh_token: "agreed-refresh", expires_in: 3600 }
+        });
+      }
+      return jsonResponse(404, { code: 404, message: "missing" });
+    }
+  });
+  const passwordSite = { ...site, authMode: "sub2api-password", credentialConfigured: true };
+  const access = await manager.getAccess(passwordSite);
+  assert.deepEqual(access, { token: "agreed-access", headers: {}, source: "password:login" });
+  assert.deepEqual(
+    calls.filter((c) => c.path.endsWith("/api/v1/auth/login")).map((c) => c.body),
+    [{ email: "user@example.com", password: "plain-secret", login_agreement_revision: "rev-123" }]
+  );
 });
 
 test("sub2api force refresh uses refresh token before falling back to password", async () => {
@@ -200,6 +246,9 @@ test("sub2api force refresh uses refresh token before falling back to password",
     browserAdapter: fakeBrowser({}),
     fetchImpl: async (url) => {
       calls.push(String(url));
+      if (String(url).endsWith("/api/v1/settings/public")) {
+        return jsonResponse(200, { code: 0, data: { login_agreement_enabled: false } });
+      }
       if (String(url).endsWith("/api/v1/auth/login")) {
         return jsonResponse(200, { code: 0, data: { access_token: "first", refresh_token: "refresh", expires_in: 3600 } });
       }
@@ -212,7 +261,10 @@ test("sub2api force refresh uses refresh token before falling back to password",
   const refreshed = await manager.getAccess(passwordSite, { forceRefresh: true });
 
   assert.deepEqual(refreshed, { token: "second", headers: {}, source: "password:refresh" });
-  assert.deepEqual(calls.map((url) => new URL(url).pathname), ["/api/v1/auth/login", "/api/v1/auth/refresh"]);
+  assert.deepEqual(
+    calls.map((url) => new URL(url).pathname).filter((p) => p.endsWith("/auth/login") || p.endsWith("/auth/refresh")),
+    ["/api/v1/auth/login", "/api/v1/auth/refresh"]
+  );
 });
 
 test("NewAPI token mode returns raw Authorization and New-Api-User headers", async () => {

@@ -19,6 +19,13 @@ import { createSiteTransferService } from "./siteTransferService.js";
 import { createRepository } from "./storage.js";
 import { createTaskQueue } from "./taskQueue.js";
 import { createSelectiveProxyFetch } from "./httpClient.js";
+import { createWindowsFetchImpl, windowsHttpBridgeConfigured } from "./windowsHttpBridge.js";
+import {
+  createPlaywrightFetchImpl,
+  playwrightBrowserBridgeConfigured,
+  playwrightSessionHosts,
+  shouldUsePlaywrightForUrl,
+} from "./playwrightBrowserBridge.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -26,13 +33,82 @@ const publicDir = path.join(rootDir, "public");
 const port = Number(process.env.PORT || 5177);
 const host = process.env.HOST || "127.0.0.1";
 const nativeFetch = globalThis.fetch;
-globalThis.fetch = createSelectiveProxyFetch({
+const selectiveProxyFetch = createSelectiveProxyFetch({
   fetchImpl: nativeFetch,
   proxyFetchImpl: undiciFetch,
   proxyUrl: process.env.SELECTIVE_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "",
   proxyHosts: process.env.SELECTIVE_PROXY_HOSTS || "",
   proxyAgentFactory: (proxyUrl) => new ProxyAgent(proxyUrl)
 });
+// Session-binding sub2api panels:
+// 1) Prefer VPS Playwright browser context (own fingerprint on this server)
+// 2) Fallback to Windows Edge bridge if Playwright fails / disabled
+// 3) Then selective proxy / native
+const playwrightFetchImpl = playwrightBrowserBridgeConfigured() ? createPlaywrightFetchImpl() : null;
+const windowsFetchImpl = windowsHttpBridgeConfigured() ? createWindowsFetchImpl() : null;
+const playwrightHosts = playwrightSessionHosts();
+const windowsHosts = new Set(
+  [
+    ...String(process.env.WINDOWS_EGRESS_HOSTS || process.env.SELECTIVE_PROXY_HOSTS || "")
+      .split(",")
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean),
+    "uni-token.com",
+    "www.uni-token.com",
+    "api-provider.uling19.com",
+    "uling19.com",
+    "www.uling19.com",
+  ]
+);
+async function responseLooksLikeSessionBinding(response) {
+  try {
+    if (!response || response.status !== 401) return false;
+    const clone = response.clone();
+    const text = await clone.text();
+    if (/SESSION_BINDING_MISMATCH|fingerprint changed|session network fingerprint/i.test(text)) return true;
+    try {
+      const json = JSON.parse(text);
+      if (json?.code === "SESSION_BINDING_MISMATCH") return true;
+    } catch {}
+  } catch {}
+  return false;
+}
+
+globalThis.fetch = async (input, init = {}) => {
+  const rawUrl = input instanceof URL ? input.toString() : String(input?.url || input || "");
+  let hostname = "";
+  try { hostname = new URL(rawUrl).hostname.toLowerCase(); } catch {}
+  // 1) VPS Playwright: works only for sessions created on this VPS fingerprint.
+  // Prefer direct/selective-proxy first for rebound VPS sessions.
+  // Browser bridges are fallbacks for tokens still bound to Windows/browser fingerprints.
+  try {
+    const direct = await selectiveProxyFetch(input, init);
+    if (!(await responseLooksLikeSessionBinding(direct))) {
+      return direct;
+    }
+  } catch {
+    // fall through to browser bridges
+  }
+
+  if (playwrightFetchImpl && (shouldUsePlaywrightForUrl(rawUrl) || playwrightHosts.has(hostname))) {
+    try {
+      const response = await playwrightFetchImpl(input, init);
+      if (!(await responseLooksLikeSessionBinding(response))) {
+        return response;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  if (windowsFetchImpl && windowsHosts.has(hostname)) {
+    try {
+      return await windowsFetchImpl(input, init);
+    } catch {
+      // fall through
+    }
+  }
+  return selectiveProxyFetch(input, init);
+};
 
 const mimeTypes = new Map([
   [".html", "text/html; charset=utf-8"],

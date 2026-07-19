@@ -277,3 +277,37 @@ dialog:has(.wide-dialog) { width: min(820px, calc(100vw - 28px)); }
   .dialog-form { padding: 16px; }
   .event-options { grid-template-columns: 1fr; }
 }
+
+
+/* Relay usage highlight: sites used by NewAPI in the last hour */
+tr.row-used-relay {
+  background: rgba(248, 113, 113, 0.12);
+}
+tr.row-used-relay:hover {
+  background: rgba(248, 113, 113, 0.18);
+}
+.used-relay-name {
+  color: #b91c1c;
+}
+
+
+.help-list {
+  margin: 0.5rem 0 1rem 1.2rem;
+  color: var(--muted, #667);
+  line-height: 1.5;
+}
+.help-list code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+#token-dialog textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+.form-error {
+  color: #b42318;
+  margin-top: 0.5rem;
+}

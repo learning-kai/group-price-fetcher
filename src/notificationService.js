@@ -22,7 +22,8 @@ export function createNotificationService({
   clock = () => new Date(),
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   queueCapacity = 100,
-  onError = () => {}
+  onError = () => {},
+  groupMembershipConfirmMs = 90_000
 }) {
   const capacity = Number.isInteger(queueCapacity) && queueCapacity > 0 ? queueCapacity : 100;
   const configCache = new Map();
@@ -30,6 +31,9 @@ export function createNotificationService({
   let outstanding = 0;
   let processing = null;
   let closing = false;
+  // Pending group_added/group_removed that must mature, or be cancelled by an opposite event.
+  const pendingMembership = new Map();
+  const membershipConfirmMs = Math.max(0, Number(groupMembershipConfirmMs) || 0);
   async function createChannel(input) {
     validateType(input.type);
     const config = normalizeConfig(input.type, input.config);
@@ -89,12 +93,16 @@ export function createNotificationService({
     });
   }
 
-  async function dispatchCollectionChanges(changes) {
+  async function dispatchCollectionChanges(changes, options = {}) {
     if (!Array.isArray(changes) || changes.length === 0) return { sent: 0 };
+    const debounced = options.skipMembershipDebounce
+      ? changes
+      : debounceMembershipChanges(changes);
+    if (debounced.length === 0) return { sent: 0 };
     const policy = repository.getNotificationPolicy();
     let sent = 0;
     for (const channel of repository.listNotificationChannels().filter((item) => item.enabled)) {
-      const eligible = changes.filter((change) => matchesChannel(channel, change, policy));
+      const eligible = debounced.filter((change) => matchesChannel(channel, change, policy));
       const ready = eligible.filter((change) => !isCoolingDown(channel.id, change, policy));
       if (ready.length === 0) continue;
       const subject = ready.length === 1
@@ -280,16 +288,118 @@ export function createNotificationService({
     return true;
   }
 
+  function membershipKey(change) {
+    return [
+      Number(change.siteId) || 0,
+      String(change.groupId ?? change.groupName ?? ""),
+      String(change.changeType || "")
+    ].join(":");
+  }
+
+  function oppositeMembershipType(type) {
+    if (type === "group_added") return "group_removed";
+    if (type === "group_removed") return "group_added";
+    return null;
+  }
+
+  function debounceMembershipChanges(changes) {
+    if (!Array.isArray(changes) || changes.length === 0) return [];
+    if (membershipConfirmMs <= 0) return changes;
+
+    const now = new Date(clock()).getTime();
+    const passThrough = [];
+
+    for (const change of changes) {
+      const type = String(change?.changeType || "");
+      if (type !== "group_added" && type !== "group_removed") {
+        passThrough.push(change);
+        continue;
+      }
+
+      const key = membershipKey(change);
+      const oppositeType = oppositeMembershipType(type);
+      const oppositeKey = membershipKey({ ...change, changeType: oppositeType });
+
+      // Opposite event within the confirm window cancels the earlier flap.
+      if (pendingMembership.has(oppositeKey)) {
+        pendingMembership.delete(oppositeKey);
+        continue;
+      }
+
+      // Same direction again: refresh the pending payload, still wait for maturity.
+      if (pendingMembership.has(key)) {
+        const pending = pendingMembership.get(key);
+        pending.change = change;
+        continue;
+      }
+
+      pendingMembership.set(key, {
+        change,
+        firstSeenAt: now,
+        confirmAt: now + membershipConfirmMs
+      });
+    }
+
+    // Promote matured membership events.
+    for (const [key, pending] of [...pendingMembership.entries()]) {
+      if (pending.confirmAt <= now) {
+        passThrough.push(pending.change);
+        pendingMembership.delete(key);
+      }
+    }
+    return passThrough;
+  }
+
+  function flushMaturedMembershipChanges() {
+    if (membershipConfirmMs <= 0 || pendingMembership.size === 0) return [];
+    const now = new Date(clock()).getTime();
+    const matured = [];
+    for (const [key, pending] of [...pendingMembership.entries()]) {
+      if (pending.confirmAt <= now) {
+        matured.push(pending.change);
+        pendingMembership.delete(key);
+      }
+    }
+    return matured;
+  }
+
   async function processQueue() {
     while (queued.length > 0) {
       const changes = queued.shift();
       try {
         await dispatchCollectionChanges(changes);
+        const matured = flushMaturedMembershipChanges();
+        if (matured.length > 0) {
+          await dispatchCollectionChanges(matured, { skipMembershipDebounce: true });
+        }
       } catch (error) {
         try { onError(error); } catch {}
       } finally {
         outstanding -= 1;
       }
+    }
+    // Drain remaining matured membership events after the queue empties.
+    try {
+      let guard = 0;
+      while (pendingMembership.size > 0 && guard < 40) {
+        guard += 1;
+        const now = new Date(clock()).getTime();
+        const waits = [...pendingMembership.values()].map((item) => Math.max(0, item.confirmAt - now));
+        const waitMs = waits.length ? Math.min(...waits) : 0;
+        if (waitMs > 0) {
+          // Don't block forever; wake periodically so close() can finish.
+          await sleep(Math.min(waitMs, 5_000));
+        }
+        const matured = flushMaturedMembershipChanges();
+        if (matured.length === 0) {
+          // Still pending and not matured after wait: stop spinning.
+          if ([...pendingMembership.values()].every((item) => item.confirmAt > new Date(clock()).getTime())) break;
+          continue;
+        }
+        await dispatchCollectionChanges(matured, { skipMembershipDebounce: true });
+      }
+    } catch (error) {
+      try { onError(error); } catch {}
     }
     processing = null;
   }
@@ -303,6 +413,8 @@ export function createNotificationService({
     dispatchCollectionChanges,
     enqueueCollectionChanges,
     enqueueEvent,
+    debounceMembershipChanges,
+    flushMaturedMembershipChanges,
     listLogs: (options) => repository.listNotificationLogs(options),
     async close() {
       closing = true;
